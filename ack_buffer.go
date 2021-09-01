@@ -89,7 +89,7 @@ func (b *AckBuffer) Add(e *UspDataMessage, timeout time.Duration) bool {
 func (b *AckBuffer) Ack(seq uint64) error {
 	b.Lock()
 	defer b.Unlock()
-	if seq < b.firstSeqNum {
+	if seq < b.firstSeqNum && uint64(len(b.buff))-(math.MaxUint64-b.firstSeqNum) <= seq {
 		return fmt.Errorf("unexpected acked sequence number: %d", seq)
 	}
 	if seq >= b.nextSeqNum && b.nextSeqNum >= math.MaxUint64-seq {

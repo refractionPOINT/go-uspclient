@@ -23,8 +23,9 @@ type Identity struct {
 }
 
 type ClientOptions struct {
-	Hostname  string
-	ParseHint string
+	Hostname    string
+	ParseHint   string
+	NumBuffered uint64
 }
 
 type connectionHeader struct {
