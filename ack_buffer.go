@@ -99,9 +99,11 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	b.firstSeqNum = seq + 1
 	for i := indexAcked + 1; i < uint64(len(b.buff)); i++ {
 		b.buff[i-indexAcked-1] = b.buff[i]
-		b.buff[i] = nil
 	}
 	b.indexNext = b.indexNext - indexAcked - 1
+	for i := b.indexNext; i < uint64(len(b.buff)); i++ {
+		b.buff[i] = nil
+	}
 	b.isAvailable.Set()
 	return nil
 }
@@ -109,5 +111,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 func (b *AckBuffer) GetUnAcked() ([]*UspDataMessage, error) {
 	b.RLock()
 	defer b.RUnlock()
-	return b.buff[:], nil
+	out := make([]*UspDataMessage, b.indexNext)
+	copy(out, b.buff[:b.indexNext])
+	return out, nil
 }
