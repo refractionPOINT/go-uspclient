@@ -26,6 +26,9 @@ type AckBuffer struct {
 	firstSeqNum uint64
 	nextSeqNum  uint64
 	ackEvery    uint64
+
+	nextToDeliver    uint64
+	isReadyToDeliver *Event
 }
 
 func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
@@ -33,10 +36,11 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 		o.BufferCapacity = defaultCapacity
 	}
 	b := &AckBuffer{
-		buff:        make([]*UspDataMessage, o.BufferCapacity),
-		ackEvery:    uint64(float64(o.BufferCapacity) * ackPercentOfCapacity),
-		isAvailable: NewEvent(),
-		firstSeqNum: 1,
+		buff:             make([]*UspDataMessage, o.BufferCapacity),
+		ackEvery:         uint64(float64(o.BufferCapacity) * ackPercentOfCapacity),
+		isAvailable:      NewEvent(),
+		firstSeqNum:      1,
+		isReadyToDeliver: NewEvent(),
 	}
 	b.isAvailable.Set()
 
@@ -80,6 +84,7 @@ func (b *AckBuffer) Add(e *UspDataMessage, timeout time.Duration) bool {
 			b.isAvailable.Clear()
 		}
 		hasBeenAdded = true
+		b.isReadyToDeliver.Set()
 		b.Unlock()
 	}
 
@@ -105,6 +110,10 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		b.buff[i] = nil
 	}
 	b.isAvailable.Set()
+	b.nextToDeliver -= indexAcked
+	if b.nextToDeliver >= b.indexNext {
+		b.isReadyToDeliver.Clear()
+	}
 	return nil
 }
 
@@ -114,4 +123,35 @@ func (b *AckBuffer) GetUnAcked() ([]*UspDataMessage, error) {
 	out := make([]*UspDataMessage, b.indexNext)
 	copy(out, b.buff[:b.indexNext])
 	return out, nil
+}
+
+func (b *AckBuffer) GetNextToDeliver(timeout time.Duration) *UspDataMessage {
+	if !b.isReadyToDeliver.WaitFor(timeout) {
+		return nil
+	}
+	b.Lock()
+	defer b.Unlock()
+	if !b.isReadyToDeliver.IsSet() {
+		return nil
+	}
+	n := b.buff[b.nextToDeliver]
+	b.nextToDeliver++
+	if b.nextToDeliver >= uint64(len(b.buff)) {
+		b.nextToDeliver = 0
+	}
+	if b.nextToDeliver >= b.indexNext {
+		b.isReadyToDeliver.Clear()
+	}
+	return n
+}
+
+func (b *AckBuffer) ResetDelivery() {
+	b.Lock()
+	defer b.Unlock()
+	b.nextToDeliver = 0
+	if b.nextToDeliver >= b.indexNext {
+		b.isReadyToDeliver.Clear()
+	} else {
+		b.isReadyToDeliver.Set()
+	}
 }
