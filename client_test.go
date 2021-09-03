@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestConnection(t *testing.T) {
 	testHostname := "testhost"
 	testHint := "hint"
 	testPort := 7777
-	nConnections := 0
+	nConnections := uint32(0)
 	wg := sync.WaitGroup{}
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isConnReceived := false
@@ -71,36 +72,46 @@ func TestConnection(t *testing.T) {
 		}
 		isHeaderValid = true
 		nConnections++
+		atomic.AddUint32(&nConnections, 1)
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			time.Sleep(5 * time.Second)
-			conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-			if err := conn.WriteJSON(&uspControlMessage{
-				Verb: uspControlMessageRECONNECT,
-			}); err != nil {
-				fmt.Printf("WriteJSON(): %v", err)
-				return
-			}
-		}()
+		m := sync.Mutex{}
+		if atomic.LoadUint32(&nConnections) == 1 {
+			// Only do a reconnect on the first connection.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				time.Sleep(5 * time.Second)
+				m.Lock()
+				defer m.Unlock()
+				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				if err := conn.WriteJSON(&uspControlMessage{
+					Verb: uspControlMessageRECONNECT,
+				}); err != nil {
+					fmt.Printf("WriteJSON(): %v\n", err)
+					return
+				}
+			}()
+		}
 
 		for {
 			conn.SetReadDeadline(time.Now().Add(20 * time.Second))
 			uMsg := UspDataMessage{}
 			if err := conn.ReadJSON(&uMsg); err != nil {
-				fmt.Printf("ReadJSON(): %v", err)
+				fmt.Printf("ReadJSON(): %v\n", err)
 				return
 			}
 			if uMsg.AckRequested {
+				m.Lock()
 				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 				if err := conn.WriteJSON(&uspControlMessage{
 					Verb:   uspControlMessageACK,
 					SeqNum: uMsg.SeqNum,
 				}); err != nil {
-					fmt.Printf("WriteJSON(): %v", err)
+					fmt.Printf("WriteJSON(): %v\n", err)
+					m.Unlock()
 					return
 				}
+				m.Unlock()
 			}
 			if v, ok := uMsg.JsonPayload["some"]; !ok || v != "payload" {
 				t.Error("missing payload")
@@ -158,8 +169,8 @@ func TestConnection(t *testing.T) {
 
 	c.Close()
 
-	if nConnections != 2 {
-		t.Errorf("unexpected number of total connections: %d", nConnections)
+	if atomic.LoadUint32(&nConnections) != 2 {
+		t.Errorf("unexpected number of total connections: %d", atomic.LoadUint32(&nConnections))
 	}
 
 	srv.Close()

@@ -21,11 +21,12 @@ type Client struct {
 	ab             *AckBuffer
 	wg             sync.WaitGroup
 	connMutex      sync.Mutex
-	isStop         bool
+	isStop         uint32
 	isReconnecting uint32
 	backoffTime    uint64
 
-	lastError error
+	lastError  error
+	errorMutex sync.Mutex
 }
 
 type Identity struct {
@@ -102,7 +103,7 @@ func (c *Client) Close() ([]*UspDataMessage, error) {
 	if err == nil {
 		err = err2
 	}
-	c.lastError = err
+	c.setLastError(err)
 	return messages, err
 }
 
@@ -113,7 +114,7 @@ func (c *Client) connect() error {
 	// Connect the websocket.
 	conn, _, err := websocket.DefaultDialer.Dial(c.wssURL, nil)
 	if err != nil {
-		c.lastError = err
+		c.setLastError(err)
 		return err
 	}
 	// Send the USP header.
@@ -124,7 +125,7 @@ func (c *Client) connect() error {
 		ParseHint:    c.options.ParseHint,
 	}); err != nil {
 		conn.Close()
-		c.lastError = err
+		c.setLastError(err)
 		return err
 	}
 	c.conn = conn
@@ -142,13 +143,13 @@ func (c *Client) connect() error {
 }
 
 func (c *Client) disconnect() error {
-	c.isStop = true
+	atomic.StoreUint32(&c.isStop, 1)
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 	err := c.conn.Close()
 	c.wg.Wait()
 	if err != nil {
-		c.lastError = err
+		c.setLastError(err)
 		return err
 	}
 	return nil
@@ -160,7 +161,7 @@ func (c *Client) reconnect() {
 		return
 	}
 	if err := c.disconnect(); err != nil {
-		c.lastError = err
+		c.setLastError(err)
 		c.log(fmt.Sprintf("error disconnecting: %v", err))
 	}
 
@@ -168,7 +169,7 @@ func (c *Client) reconnect() {
 	c.ab.ResetDelivery()
 
 	if err := c.connect(); err != nil {
-		c.lastError = err
+		c.setLastError(err)
 		c.log(fmt.Sprintf("error reconnecting: %v", err))
 	}
 }
@@ -184,17 +185,17 @@ func (c *Client) Ship(message *UspDataMessage, timeout time.Duration) error {
 func (c *Client) GetUnsent() ([]*UspDataMessage, error) {
 	messages, err := c.ab.GetUnAcked()
 	if err != nil {
-		c.lastError = err
+		c.setLastError(err)
 		return nil, err
 	}
 	return messages, nil
 }
 
 func (c *Client) listener() {
-	for !c.isStop {
+	for atomic.LoadUint32(&c.isStop) == 0 {
 		msg := uspControlMessage{}
 		if err := c.conn.ReadJSON(&msg); err != nil {
-			c.lastError = err
+			c.setLastError(err)
 			go c.reconnect()
 			return
 		}
@@ -202,7 +203,7 @@ func (c *Client) listener() {
 		switch msg.Verb {
 		case uspControlMessageACK:
 			if err := c.ab.Ack(msg.SeqNum); err != nil {
-				c.lastError = err
+				c.setLastError(err)
 				c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
 			}
 		case uspControlMessageBACKOFF:
@@ -214,13 +215,13 @@ func (c *Client) listener() {
 			// Ignoring unknown verbs.
 			err := fmt.Errorf("received unknown control message: %s", msg.Verb)
 			c.log(err.Error())
-			c.lastError = err
+			c.setLastError(err)
 		}
 	}
 }
 
 func (c *Client) sender() {
-	for !c.isStop {
+	for atomic.LoadUint32(&c.isStop) == 0 {
 		backoffSec := atomic.SwapUint64(&c.backoffTime, 0)
 		if backoffSec != 0 {
 			c.log(fmt.Sprintf("backing off %d seconds", backoffSec))
@@ -232,7 +233,7 @@ func (c *Client) sender() {
 		}
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if err := c.conn.WriteJSON(message); err != nil {
-			c.lastError = err
+			c.setLastError(err)
 			go c.reconnect()
 			return
 		}
@@ -241,6 +242,12 @@ func (c *Client) sender() {
 
 func (c *Client) GetLastError() error {
 	return c.lastError
+}
+
+func (c *Client) setLastError(err error) {
+	c.errorMutex.Lock()
+	defer c.errorMutex.Unlock()
+	c.lastError = err
 }
 
 func (c *Client) log(m string) {
