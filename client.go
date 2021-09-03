@@ -38,7 +38,10 @@ type ClientOptions struct {
 	ParseHint     string
 	BufferOptions AckBufferOptions
 
-	debugLog func(string)
+	DebugLog func(string)
+
+	// Auto-detect if not specified (preferred).
+	DestURL string
 }
 
 type connectionHeader struct {
@@ -52,19 +55,28 @@ var ErrorStaleConnection = errors.New("connection stale")
 
 func NewClient(i Identity, o ClientOptions) (*Client, error) {
 	// Get an SDK instance so we can resolve the datacenter.
-	org, err := lc.NewOrganizationFromClientOptions(lc.ClientOptions{}, nil)
+	org, err := lc.NewOrganizationFromClientOptions(lc.ClientOptions{
+		OID: i.Oid,
+	}, nil)
 	if err != nil {
 		return nil, err
 	}
-	// Resolve the WSS URL for our datacenter.
-	urls, err := org.GetURLs()
-	if err != nil {
-		return nil, err
+
+	// Use the URL provided or auto-detect.
+	wssEndpoint := o.DestURL
+	if wssEndpoint == "" {
+		// Audo-detect, resolve the WSS URL for our datacenter.
+		urls, err := org.GetURLs()
+		if err != nil {
+			return nil, err
+		}
+		u, ok := urls["lc_wss"]
+		if !ok {
+			return nil, errors.New("site url for org not found")
+		}
+		wssEndpoint = fmt.Sprintf("wss://%s/usp", u)
 	}
-	wssEndpoint, ok := urls["lc_wss"]
-	if !ok {
-		return nil, errors.New("site url for org not found")
-	}
+
 	ab, err := NewAckBuffer(o.BufferOptions)
 	if err != nil {
 		return nil, err
@@ -73,7 +85,7 @@ func NewClient(i Identity, o ClientOptions) (*Client, error) {
 		ident:   i,
 		options: o,
 		org:     org,
-		wssURL:  fmt.Sprintf("wss://%s/usp", wssEndpoint),
+		wssURL:  wssEndpoint,
 		ab:      ab,
 	}
 	if err := c.connect(); err != nil {
@@ -232,8 +244,8 @@ func (c *Client) GetLastError() error {
 }
 
 func (c *Client) log(m string) {
-	if c.options.debugLog == nil {
+	if c.options.DebugLog == nil {
 		return
 	}
-	c.options.debugLog(m)
+	c.options.DebugLog(m)
 }
