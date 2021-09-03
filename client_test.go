@@ -23,6 +23,8 @@ func TestConnection(t *testing.T) {
 	testHostname := "testhost"
 	testHint := "hint"
 	testPort := 7777
+	nConnections := 0
+	wg := sync.WaitGroup{}
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isConnReceived := false
 		isHeaderReceived := false
@@ -68,12 +70,49 @@ func TestConnection(t *testing.T) {
 			return
 		}
 		isHeaderValid = true
+		nConnections++
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(5 * time.Second)
+			conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if err := conn.WriteJSON(&uspControlMessage{
+				Verb: uspControlMessageRECONNECT,
+			}); err != nil {
+				fmt.Printf("WriteJSON(): %v", err)
+				return
+			}
+		}()
+
+		for {
+			conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+			uMsg := UspDataMessage{}
+			if err := conn.ReadJSON(&uMsg); err != nil {
+				fmt.Printf("ReadJSON(): %v", err)
+				return
+			}
+			if uMsg.AckRequested {
+				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				if err := conn.WriteJSON(&uspControlMessage{
+					Verb:   uspControlMessageACK,
+					SeqNum: uMsg.SeqNum,
+				}); err != nil {
+					fmt.Printf("WriteJSON(): %v", err)
+					return
+				}
+			}
+			if v, ok := uMsg.JsonPayload["some"]; !ok || v != "payload" {
+				t.Error("missing payload")
+				return
+			}
+		}
 	})
 	srv := &http.Server{
 		Handler: h,
 		Addr:    fmt.Sprintf("127.0.0.1:%d", testPort),
 	}
-	wg := sync.WaitGroup{}
+
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -93,6 +132,9 @@ func TestConnection(t *testing.T) {
 		DebugLog: func(s string) {
 			fmt.Println(s)
 		},
+		BufferOptions: AckBufferOptions{
+			BufferCapacity: 10,
+		},
 	})
 	if err != nil {
 		t.Errorf("NewClient(): %v", err)
@@ -100,7 +142,25 @@ func TestConnection(t *testing.T) {
 	}
 
 	time.Sleep(2 * time.Second)
+
+	for i := 0; i < 30; i++ {
+		if err := c.Ship(&UspDataMessage{
+			JsonPayload: map[string]interface{}{
+				"some": "payload",
+			},
+		}, 1*time.Second); err != nil {
+			t.Errorf("Ship(): %v", err)
+			break
+		}
+	}
+
+	time.Sleep(10 * time.Second)
+
 	c.Close()
+
+	if nConnections != 2 {
+		t.Errorf("unexpected number of total connections: %d", nConnections)
+	}
 
 	srv.Close()
 	wg.Wait()
