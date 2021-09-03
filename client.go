@@ -127,6 +127,7 @@ func (c *Client) connect() error {
 		c.lastError = err
 		return err
 	}
+	c.conn = conn
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -137,7 +138,6 @@ func (c *Client) connect() error {
 		defer c.wg.Done()
 		c.sender()
 	}()
-	c.conn = conn
 	return nil
 }
 
