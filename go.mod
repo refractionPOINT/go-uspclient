@@ -1,4 +1,4 @@
-module uspclient
+module github.com/refractionPOINT/go-uspclient
 
 go 1.16
 
