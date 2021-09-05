@@ -13,7 +13,7 @@ const (
 )
 
 type AckBufferOptions struct {
-	BufferCapacity uint64
+	BufferCapacity uint64 `json:"buffer_capacity" yaml:"buffer_capacity"`
 }
 
 type AckBuffer struct {
