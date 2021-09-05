@@ -13,7 +13,7 @@ type UspDataMessage struct {
 	JsonPayload   map[string]interface{} `json:"j,omitempty"`
 	BinaryPayload string                 `json:"b,omitempty"`
 	EventType     string                 `json:"e,omitempty"`
-	Timestamp     uint64                 `json:"s,omitempty"`
+	TimestampMs   uint64                 `json:"s,omitempty"`
 
 	// Optional contextual information.
 	ThisAtom        string `json:"this,omitempty"`
