@@ -52,7 +52,7 @@ type connectionHeader struct {
 	ParseHint    string `json:"PARSE_HINT,omitempty"`
 }
 
-var ErrorStaleConnection = errors.New("connection stale")
+var ErrorBufferFull = errors.New("buffer full")
 
 func NewClient(o ClientOptions) (*Client, error) {
 	// Get an SDK instance so we can resolve the datacenter.
@@ -154,10 +154,10 @@ func (c *Client) disconnect() error {
 	return nil
 }
 
-func (c *Client) reconnect() {
+func (c *Client) Reconnect() (bool, error) {
 	// Make sure only one thread is reconnecting
 	if !atomic.CompareAndSwapUint32(&c.isReconnecting, 0, 1) {
-		return
+		return false, nil
 	}
 	if err := c.disconnect(); err != nil {
 		c.setLastError(err)
@@ -167,15 +167,20 @@ func (c *Client) reconnect() {
 	// We assume that anything that was not ACKed should be resent
 	c.ab.ResetDelivery()
 
-	if err := c.connect(); err != nil {
+	err := c.connect()
+	if err != nil {
 		c.setLastError(err)
 		c.log(fmt.Sprintf("error reconnecting: %v", err))
 	}
+
+	atomic.StoreUint32(&c.isReconnecting, 0)
+
+	return true, err
 }
 
 func (c *Client) Ship(message *UspDataMessage, timeout time.Duration) error {
 	if !c.ab.Add(message, timeout) {
-		return ErrorStaleConnection
+		return ErrorBufferFull
 	}
 
 	return nil
@@ -195,7 +200,7 @@ func (c *Client) listener() {
 		msg := uspControlMessage{}
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			c.setLastError(err)
-			go c.reconnect()
+			go c.Reconnect()
 			return
 		}
 
@@ -208,7 +213,7 @@ func (c *Client) listener() {
 		case uspControlMessageBACKOFF:
 			atomic.SwapUint64(&c.backoffTime, msg.Duration)
 		case uspControlMessageRECONNECT:
-			go c.reconnect()
+			go c.Reconnect()
 			return
 		default:
 			// Ignoring unknown verbs.
@@ -233,7 +238,7 @@ func (c *Client) sender() {
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if err := c.conn.WriteJSON(message); err != nil {
 			c.setLastError(err)
-			go c.reconnect()
+			go c.Reconnect()
 			return
 		}
 	}
