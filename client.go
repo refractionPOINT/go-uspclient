@@ -12,7 +12,6 @@ import (
 )
 
 type Client struct {
-	ident   Identity
 	options ClientOptions
 	org     *lc.Organization
 	wssURL  string
@@ -30,19 +29,20 @@ type Client struct {
 }
 
 type Identity struct {
-	Oid          string
-	IngestionKey string
+	Oid          string `json:"oid" yaml:"oid"`
+	IngestionKey string `json:"ingestion_key" yaml:"ingestion_key"`
 }
 
 type ClientOptions struct {
-	Hostname      string
-	ParseHint     string
-	BufferOptions AckBufferOptions
+	Identity      Identity         `json:"identity" yaml:"identity"`
+	Hostname      string           `json:"hostname,omitempty" yaml:"hostname,omitempty"`
+	ParseHint     string           `json:"parse_hint,omitempty" yaml:"parse_hint,omitempty"`
+	BufferOptions AckBufferOptions `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
 
-	DebugLog func(string)
+	DebugLog func(string) `json:"-" yaml:"-"`
 
 	// Auto-detect if not specified (preferred).
-	DestURL string
+	DestURL string `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
 }
 
 type connectionHeader struct {
@@ -54,10 +54,10 @@ type connectionHeader struct {
 
 var ErrorStaleConnection = errors.New("connection stale")
 
-func NewClient(i Identity, o ClientOptions) (*Client, error) {
+func NewClient(o ClientOptions) (*Client, error) {
 	// Get an SDK instance so we can resolve the datacenter.
 	org, err := lc.NewOrganizationFromClientOptions(lc.ClientOptions{
-		OID: i.Oid,
+		OID: o.Identity.Oid,
 	}, nil)
 	if err != nil {
 		return nil, err
@@ -83,7 +83,6 @@ func NewClient(i Identity, o ClientOptions) (*Client, error) {
 		return nil, err
 	}
 	c := &Client{
-		ident:   i,
 		options: o,
 		org:     org,
 		wssURL:  wssEndpoint,
@@ -119,8 +118,8 @@ func (c *Client) connect() error {
 	}
 	// Send the USP header.
 	if err := conn.WriteJSON(connectionHeader{
-		Oid:          c.ident.Oid,
-		IngestionKey: c.ident.IngestionKey,
+		Oid:          c.options.Identity.Oid,
+		IngestionKey: c.options.Identity.IngestionKey,
 		Hostname:     c.options.Hostname,
 		ParseHint:    c.options.ParseHint,
 	}); err != nil {

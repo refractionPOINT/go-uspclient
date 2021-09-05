@@ -133,10 +133,11 @@ func TestConnection(t *testing.T) {
 	}()
 	time.Sleep(2 * time.Second)
 
-	c, err := NewClient(Identity{
-		Oid:          testOID,
-		IngestionKey: testIK,
-	}, ClientOptions{
+	c, err := NewClient(ClientOptions{
+		Identity: Identity{
+			Oid:          testOID,
+			IngestionKey: testIK,
+		},
 		DestURL:   fmt.Sprintf("ws://127.0.0.1:%d/usp", testPort),
 		Hostname:  testHostname,
 		ParseHint: testHint,
