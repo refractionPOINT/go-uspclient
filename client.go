@@ -59,6 +59,12 @@ type frame struct {
 	CompressedMessages string        `json:"z,omitempty"`
 }
 
+type uspFrame struct {
+	ModuleID           int8                `json:"m"`
+	Messages           []uspControlMessage `json:"d,omitempty"`
+	CompressedMessages string              `json:"z,omitempty"`
+}
+
 const (
 	moduleIDHCP = 1
 	moduleIDUSP = 6
@@ -222,29 +228,30 @@ func (c *Client) GetUnsent() ([]*UspDataMessage, error) {
 
 func (c *Client) listener() {
 	for atomic.LoadUint32(&c.isStop) == 0 {
-		msg := uspControlMessage{}
-		if err := c.conn.ReadJSON(&msg); err != nil {
+		f := uspFrame{}
+		if err := c.conn.ReadJSON(&f); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
 		}
-
-		switch msg.Verb {
-		case uspControlMessageACK:
-			if err := c.ab.Ack(msg.SeqNum); err != nil {
+		for _, msg := range f.Messages {
+			switch msg.Verb {
+			case uspControlMessageACK:
+				if err := c.ab.Ack(msg.SeqNum); err != nil {
+					c.setLastError(err)
+					c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
+				}
+			case uspControlMessageBACKOFF:
+				atomic.SwapUint64(&c.backoffTime, msg.Duration)
+			case uspControlMessageRECONNECT:
+				go c.Reconnect()
+				return
+			default:
+				// Ignoring unknown verbs.
+				err := fmt.Errorf("received unknown control message: %s", msg.Verb)
+				c.log(err.Error())
 				c.setLastError(err)
-				c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
 			}
-		case uspControlMessageBACKOFF:
-			atomic.SwapUint64(&c.backoffTime, msg.Duration)
-		case uspControlMessageRECONNECT:
-			go c.Reconnect()
-			return
-		default:
-			// Ignoring unknown verbs.
-			err := fmt.Errorf("received unknown control message: %s", msg.Verb)
-			c.log(err.Error())
-			c.setLastError(err)
 		}
 	}
 }
