@@ -53,6 +53,17 @@ type connectionHeader struct {
 	ParseHint    string `json:"PARSE_HINT,omitempty"`
 }
 
+type frame struct {
+	ModuleID           int8          `json:"m"`
+	Messages           []interface{} `json:"d,omitempty"`
+	CompressedMessages string        `json:"z,omitempty"`
+}
+
+const (
+	moduleIDHCP = 1
+	moduleIDUSP = 6
+)
+
 var ErrorBufferFull = errors.New("buffer full")
 
 func NewClient(o ClientOptions) (*Client, error) {
@@ -113,7 +124,7 @@ func (c *Client) Close() ([]*UspDataMessage, error) {
 }
 
 func (c *Client) connect() error {
-	c.log("usp-cliwnt connecting")
+	c.log("usp-client connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 
@@ -125,12 +136,15 @@ func (c *Client) connect() error {
 		return err
 	}
 	// Send the USP header.
-	if err := conn.WriteJSON(connectionHeader{
-		Oid:          c.options.Identity.Oid,
-		IngestionKey: c.options.Identity.IngestionKey,
-		Hostname:     c.options.Hostname,
-		ParseHint:    c.options.ParseHint,
-	}); err != nil {
+	if err := conn.WriteJSON(frame{
+		ModuleID: moduleIDHCP,
+		Messages: []interface{}{
+			connectionHeader{
+				Oid:          c.options.Identity.Oid,
+				IngestionKey: c.options.Identity.IngestionKey,
+				Hostname:     c.options.Hostname,
+				ParseHint:    c.options.ParseHint,
+			}}}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		conn.Close()
 		c.setLastError(err)
@@ -242,12 +256,28 @@ func (c *Client) sender() {
 			c.log(fmt.Sprintf("backing off %d seconds", backoffSec))
 			time.Sleep(time.Duration(backoffSec) * time.Second)
 		}
+		// Wait for a bit for messages to arrive.
 		message := c.ab.GetNextToDeliver(500 * time.Millisecond)
 		if message == nil {
 			continue
 		}
+		// We will have at least one message ready to go.
+		messages := []interface{}{message}
+		for len(messages) < 1000 {
+			// Add more messages to the frame as long as
+			// they're ready to go.
+			message := c.ab.GetNextToDeliver(0)
+			if message == nil {
+				break
+			}
+			messages = append(messages, message)
+		}
+		// batch messages together and write frames
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := c.conn.WriteJSON(message); err != nil {
+		if err := c.conn.WriteJSON(frame{
+			ModuleID: moduleIDUSP,
+			Messages: messages,
+		}); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
