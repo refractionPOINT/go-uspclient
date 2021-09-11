@@ -1,6 +1,7 @@
 package uspclient
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -55,11 +56,16 @@ func TestConnection(t *testing.T) {
 		}
 
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		msg := map[string]interface{}{}
-		if err := conn.ReadJSON(&msg); err != nil {
+		f := frame{}
+		if err := conn.ReadJSON(&f); err != nil {
 			t.Errorf("ReadJSON(): %v", err)
 			return
 		}
+		if len(f.Messages) == 0 {
+			t.Error("not enough messages")
+			return
+		}
+		msg := f.Messages[0].(map[string]interface{})
 		isHeaderReceived = true
 
 		oid, _ := msg["OID"].(string)
@@ -95,27 +101,37 @@ func TestConnection(t *testing.T) {
 
 		for {
 			conn.SetReadDeadline(time.Now().Add(20 * time.Second))
-			uMsg := UspDataMessage{}
-			if err := conn.ReadJSON(&uMsg); err != nil {
+			f := frame{}
+			if err := conn.ReadJSON(&f); err != nil {
 				fmt.Printf("ReadJSON(): %v\n", err)
 				return
 			}
-			if uMsg.AckRequested {
-				m.Lock()
-				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				if err := conn.WriteJSON(&uspControlMessage{
-					Verb:   uspControlMessageACK,
-					SeqNum: uMsg.SeqNum,
-				}); err != nil {
-					fmt.Printf("WriteJSON(): %v\n", err)
+			if len(f.Messages) == 0 {
+				t.Error("missing messages")
+				return
+			}
+			for _, nm := range f.Messages {
+				uMsg := UspDataMessage{}
+				d, _ := json.Marshal(nm)
+				json.Unmarshal(d, &uMsg)
+
+				if uMsg.AckRequested {
+					m.Lock()
+					conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+					if err := conn.WriteJSON(&uspControlMessage{
+						Verb:   uspControlMessageACK,
+						SeqNum: uMsg.SeqNum,
+					}); err != nil {
+						fmt.Printf("WriteJSON(): %v\n", err)
+						m.Unlock()
+						return
+					}
 					m.Unlock()
+				}
+				if v, ok := uMsg.JsonPayload["some"]; !ok || v != "payload" {
+					t.Error("missing payload")
 					return
 				}
-				m.Unlock()
-			}
-			if v, ok := uMsg.JsonPayload["some"]; !ok || v != "payload" {
-				t.Error("missing payload")
-				return
 			}
 		}
 	})

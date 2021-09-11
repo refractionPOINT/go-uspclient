@@ -124,7 +124,7 @@ func (c *Client) Close() ([]*UspDataMessage, error) {
 }
 
 func (c *Client) connect() error {
-	c.log("usp-cliwnt connecting")
+	c.log("usp-client connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 
