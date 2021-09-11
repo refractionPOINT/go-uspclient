@@ -90,9 +90,11 @@ func TestConnection(t *testing.T) {
 				m.Lock()
 				defer m.Unlock()
 				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				if err := conn.WriteJSON(&uspControlMessage{
-					Verb: uspControlMessageRECONNECT,
-				}); err != nil {
+				if err := conn.WriteJSON(frame{
+					ModuleID: moduleIDUSP,
+					Messages: []interface{}{&uspControlMessage{
+						Verb: uspControlMessageRECONNECT,
+					}}}); err != nil {
 					fmt.Printf("WriteJSON(): %v\n", err)
 					return
 				}
@@ -118,10 +120,12 @@ func TestConnection(t *testing.T) {
 				if uMsg.AckRequested {
 					m.Lock()
 					conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-					if err := conn.WriteJSON(&uspControlMessage{
-						Verb:   uspControlMessageACK,
-						SeqNum: uMsg.SeqNum,
-					}); err != nil {
+					if err := conn.WriteJSON(frame{
+						ModuleID: moduleIDUSP,
+						Messages: []interface{}{&uspControlMessage{
+							Verb:   uspControlMessageACK,
+							SeqNum: uMsg.SeqNum,
+						}}}); err != nil {
 						fmt.Printf("WriteJSON(): %v\n", err)
 						m.Unlock()
 						return
