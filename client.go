@@ -3,6 +3,7 @@ package uspclient
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,6 +79,10 @@ func NewClient(o ClientOptions) (*Client, error) {
 		wssEndpoint = fmt.Sprintf("wss://%s/usp", u)
 	}
 
+	if o.Hostname == "" {
+		o.Hostname, _ = os.Hostname()
+	}
+
 	ab, err := NewAckBuffer(o.BufferOptions)
 	if err != nil {
 		return nil, err
@@ -96,6 +101,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 }
 
 func (c *Client) Close() ([]*UspDataMessage, error) {
+	c.log("usp-client closing")
 	err1 := c.disconnect()
 	messages, err2 := c.ab.GetUnAcked()
 	err := err1
@@ -107,12 +113,14 @@ func (c *Client) Close() ([]*UspDataMessage, error) {
 }
 
 func (c *Client) connect() error {
+	c.options.DebugLog("usp-cliwnt connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 
 	// Connect the websocket.
 	conn, _, err := websocket.DefaultDialer.Dial(c.wssURL, nil)
 	if err != nil {
+		c.options.DebugLog(fmt.Sprintf("usp-client Dial(): %v", err))
 		c.setLastError(err)
 		return err
 	}
@@ -123,6 +131,7 @@ func (c *Client) connect() error {
 		Hostname:     c.options.Hostname,
 		ParseHint:    c.options.ParseHint,
 	}); err != nil {
+		c.options.DebugLog(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		conn.Close()
 		c.setLastError(err)
 		return err
@@ -138,10 +147,12 @@ func (c *Client) connect() error {
 		defer c.wg.Done()
 		c.sender()
 	}()
+	c.log("usp-client connected")
 	return nil
 }
 
 func (c *Client) disconnect() error {
+	c.log("usp-client disconnecting")
 	atomic.StoreUint32(&c.isStop, 1)
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
