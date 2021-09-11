@@ -113,14 +113,14 @@ func (c *Client) Close() ([]*UspDataMessage, error) {
 }
 
 func (c *Client) connect() error {
-	c.options.DebugLog("usp-cliwnt connecting")
+	c.log("usp-cliwnt connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 
 	// Connect the websocket.
 	conn, _, err := websocket.DefaultDialer.Dial(c.wssURL, nil)
 	if err != nil {
-		c.options.DebugLog(fmt.Sprintf("usp-client Dial(): %v", err))
+		c.log(fmt.Sprintf("usp-client Dial(): %v", err))
 		c.setLastError(err)
 		return err
 	}
@@ -131,7 +131,7 @@ func (c *Client) connect() error {
 		Hostname:     c.options.Hostname,
 		ParseHint:    c.options.ParseHint,
 	}); err != nil {
-		c.options.DebugLog(fmt.Sprintf("usp-client WriteJSON(): %v", err))
+		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		conn.Close()
 		c.setLastError(err)
 		return err
