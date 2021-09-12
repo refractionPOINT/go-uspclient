@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,6 +103,12 @@ func NewClient(o ClientOptions) (*Client, error) {
 		o.Hostname, _ = os.Hostname()
 	}
 
+	if o.FormatRE != "" {
+		if _, err := regexp.Compile(o.FormatRE); err != nil {
+			return nil, fmt.Errorf("invalid format_re: %v", err)
+		}
+	}
+
 	ab, err := NewAckBuffer(o.BufferOptions)
 	if err != nil {
 		return nil, err
@@ -152,7 +159,7 @@ func (c *Client) connect() error {
 				IngestionKey: c.options.Identity.IngestionKey,
 				Hostname:     c.options.Hostname,
 				ParseHint:    c.options.ParseHint,
-        FormatRE:     c.options.FormatRE,
+				FormatRE:     c.options.FormatRE,
 			}}}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		conn.Close()
