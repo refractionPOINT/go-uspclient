@@ -3,6 +3,7 @@ package uspclient
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +55,23 @@ type connectionHeader struct {
 	FormatRE     string `json:"FORMAT_RE,omitempty"`
 }
 
+type frame struct {
+	ModuleID           int8          `json:"m"`
+	Messages           []interface{} `json:"d,omitempty"`
+	CompressedMessages string        `json:"z,omitempty"`
+}
+
+type uspFrame struct {
+	ModuleID           int8                `json:"m"`
+	Messages           []uspControlMessage `json:"d,omitempty"`
+	CompressedMessages string              `json:"z,omitempty"`
+}
+
+const (
+	moduleIDHCP = 1
+	moduleIDUSP = 6
+)
+
 var ErrorBufferFull = errors.New("buffer full")
 
 func NewClient(o ClientOptions) (*Client, error) {
@@ -80,6 +98,10 @@ func NewClient(o ClientOptions) (*Client, error) {
 		wssEndpoint = fmt.Sprintf("wss://%s/usp", u)
 	}
 
+	if o.Hostname == "" {
+		o.Hostname, _ = os.Hostname()
+	}
+
 	ab, err := NewAckBuffer(o.BufferOptions)
 	if err != nil {
 		return nil, err
@@ -98,6 +120,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 }
 
 func (c *Client) Close() ([]*UspDataMessage, error) {
+	c.log("usp-client closing")
 	err1 := c.disconnect()
 	messages, err2 := c.ab.GetUnAcked()
 	err := err1
@@ -109,23 +132,29 @@ func (c *Client) Close() ([]*UspDataMessage, error) {
 }
 
 func (c *Client) connect() error {
+	c.log("usp-client connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 
 	// Connect the websocket.
 	conn, _, err := websocket.DefaultDialer.Dial(c.wssURL, nil)
 	if err != nil {
+		c.log(fmt.Sprintf("usp-client Dial(): %v", err))
 		c.setLastError(err)
 		return err
 	}
 	// Send the USP header.
-	if err := conn.WriteJSON(connectionHeader{
-		Oid:          c.options.Identity.Oid,
-		IngestionKey: c.options.Identity.IngestionKey,
-		Hostname:     c.options.Hostname,
-		ParseHint:    c.options.ParseHint,
-		FormatRE:     c.options.FormatRE,
-	}); err != nil {
+	if err := conn.WriteJSON(frame{
+		ModuleID: moduleIDHCP,
+		Messages: []interface{}{
+			connectionHeader{
+				Oid:          c.options.Identity.Oid,
+				IngestionKey: c.options.Identity.IngestionKey,
+				Hostname:     c.options.Hostname,
+				ParseHint:    c.options.ParseHint,
+        FormatRE:     c.options.FormatRE,
+			}}}); err != nil {
+		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		conn.Close()
 		c.setLastError(err)
 		return err
@@ -141,10 +170,12 @@ func (c *Client) connect() error {
 		defer c.wg.Done()
 		c.sender()
 	}()
+	c.log("usp-client connected")
 	return nil
 }
 
 func (c *Client) disconnect() error {
+	c.log("usp-client disconnecting")
 	atomic.StoreUint32(&c.isStop, 1)
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
@@ -200,29 +231,30 @@ func (c *Client) GetUnsent() ([]*UspDataMessage, error) {
 
 func (c *Client) listener() {
 	for atomic.LoadUint32(&c.isStop) == 0 {
-		msg := uspControlMessage{}
-		if err := c.conn.ReadJSON(&msg); err != nil {
+		f := uspFrame{}
+		if err := c.conn.ReadJSON(&f); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
 		}
-
-		switch msg.Verb {
-		case uspControlMessageACK:
-			if err := c.ab.Ack(msg.SeqNum); err != nil {
+		for _, msg := range f.Messages {
+			switch msg.Verb {
+			case uspControlMessageACK:
+				if err := c.ab.Ack(msg.SeqNum); err != nil {
+					c.setLastError(err)
+					c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
+				}
+			case uspControlMessageBACKOFF:
+				atomic.SwapUint64(&c.backoffTime, msg.Duration)
+			case uspControlMessageRECONNECT:
+				go c.Reconnect()
+				return
+			default:
+				// Ignoring unknown verbs.
+				err := fmt.Errorf("received unknown control message: %s", msg.Verb)
+				c.log(err.Error())
 				c.setLastError(err)
-				c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
 			}
-		case uspControlMessageBACKOFF:
-			atomic.SwapUint64(&c.backoffTime, msg.Duration)
-		case uspControlMessageRECONNECT:
-			go c.Reconnect()
-			return
-		default:
-			// Ignoring unknown verbs.
-			err := fmt.Errorf("received unknown control message: %s", msg.Verb)
-			c.log(err.Error())
-			c.setLastError(err)
 		}
 	}
 }
@@ -234,12 +266,28 @@ func (c *Client) sender() {
 			c.log(fmt.Sprintf("backing off %d seconds", backoffSec))
 			time.Sleep(time.Duration(backoffSec) * time.Second)
 		}
+		// Wait for a bit for messages to arrive.
 		message := c.ab.GetNextToDeliver(500 * time.Millisecond)
 		if message == nil {
 			continue
 		}
+		// We will have at least one message ready to go.
+		messages := []interface{}{message}
+		for len(messages) < 1000 {
+			// Add more messages to the frame as long as
+			// they're ready to go.
+			message := c.ab.GetNextToDeliver(0)
+			if message == nil {
+				break
+			}
+			messages = append(messages, message)
+		}
+		// batch messages together and write frames
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := c.conn.WriteJSON(message); err != nil {
+		if err := c.conn.WriteJSON(frame{
+			ModuleID: moduleIDUSP,
+			Messages: messages,
+		}); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
