@@ -37,6 +37,7 @@ type ClientOptions struct {
 	Identity      Identity         `json:"identity" yaml:"identity"`
 	Hostname      string           `json:"hostname,omitempty" yaml:"hostname,omitempty"`
 	ParseHint     string           `json:"parse_hint,omitempty" yaml:"parse_hint,omitempty"`
+	FormatRE      string           `json:"format_re,omitempty" yaml:"format_re,omitempty"`
 	BufferOptions AckBufferOptions `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
 
 	DebugLog func(string) `json:"-" yaml:"-"`
@@ -50,6 +51,7 @@ type connectionHeader struct {
 	IngestionKey string `json:"IK"`
 	Hostname     string `json:"HOST_NAME,omitempty"`
 	ParseHint    string `json:"PARSE_HINT,omitempty"`
+	FormatRE     string `json:"FORMAT_RE,omitempty"`
 }
 
 var ErrorBufferFull = errors.New("buffer full")
@@ -122,6 +124,7 @@ func (c *Client) connect() error {
 		IngestionKey: c.options.Identity.IngestionKey,
 		Hostname:     c.options.Hostname,
 		ParseHint:    c.options.ParseHint,
+		FormatRE:     c.options.FormatRE,
 	}); err != nil {
 		conn.Close()
 		c.setLastError(err)
