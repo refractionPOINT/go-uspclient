@@ -167,6 +167,7 @@ func (c *Client) connect() error {
 		c.setLastError(err)
 		return err
 	}
+	c.isStop.Clear()
 	c.conn = conn
 	c.wg.Add(1)
 	go func() {
