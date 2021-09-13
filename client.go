@@ -22,7 +22,7 @@ type Client struct {
 	ab             *AckBuffer
 	wg             sync.WaitGroup
 	connMutex      sync.Mutex
-	isStop         uint32
+	isStop         *Event
 	isReconnecting uint32
 	backoffTime    uint64
 
@@ -118,6 +118,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 		org:     org,
 		wssURL:  wssEndpoint,
 		ab:      ab,
+		isStop:  NewEvent(),
 	}
 	if err := c.connect(); err != nil {
 		return nil, err
@@ -177,13 +178,18 @@ func (c *Client) connect() error {
 		defer c.wg.Done()
 		c.sender()
 	}()
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		c.keepAliveSender()
+	}()
 	c.log("usp-client connected")
 	return nil
 }
 
 func (c *Client) disconnect() error {
 	c.log("usp-client disconnecting")
-	atomic.StoreUint32(&c.isStop, 1)
+	c.isStop.Set()
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 	err := c.conn.Close()
@@ -237,8 +243,11 @@ func (c *Client) GetUnsent() ([]*UspDataMessage, error) {
 }
 
 func (c *Client) listener() {
-	for atomic.LoadUint32(&c.isStop) == 0 {
+	defer c.log("listener exited")
+
+	for !c.isStop.IsSet() {
 		f := uspFrame{}
+		c.conn.SetReadDeadline(time.Now().Add(60 * time.Minute))
 		if err := c.conn.ReadJSON(&f); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
@@ -267,7 +276,9 @@ func (c *Client) listener() {
 }
 
 func (c *Client) sender() {
-	for atomic.LoadUint32(&c.isStop) == 0 {
+	defer c.log("sender exited")
+
+	for !c.isStop.IsSet() {
 		backoffSec := atomic.SwapUint64(&c.backoffTime, 0)
 		if backoffSec != 0 {
 			c.log(fmt.Sprintf("backing off %d seconds", backoffSec))
@@ -294,6 +305,26 @@ func (c *Client) sender() {
 		if err := c.conn.WriteJSON(frame{
 			ModuleID: moduleIDUSP,
 			Messages: messages,
+		}); err != nil {
+			c.setLastError(err)
+			go c.Reconnect()
+			return
+		}
+	}
+}
+
+func (c *Client) keepAliveSender() {
+	defer c.log("keepalive exited")
+
+	for {
+		if c.isStop.WaitFor(30 * time.Second) {
+			return
+		}
+
+		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := c.conn.WriteJSON(frame{
+			ModuleID: moduleIDUSP,
+			Messages: []interface{}{},
 		}); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
