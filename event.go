@@ -92,5 +92,7 @@ func removeWaiter(s []chan struct{}, i int) []chan struct{} {
 }
 
 func (e *Event) IsSet() bool {
+	e.m.Lock()
+	defer e.m.Unlock()
 	return e.v
 }
