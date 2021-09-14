@@ -215,10 +215,16 @@ func (c *Client) Reconnect() (bool, error) {
 	// We assume that anything that was not ACKed should be resent
 	c.ab.ResetDelivery()
 
-	err := c.connect()
-	if err != nil {
-		c.setLastError(err)
-		c.log(fmt.Sprintf("error reconnecting: %v", err))
+	var err error
+	for {
+		err = c.connect()
+		if err != nil {
+			c.setLastError(err)
+			c.log(fmt.Sprintf("error reconnecting: %v", err))
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		break
 	}
 
 	atomic.StoreUint32(&c.isReconnecting, 0)
@@ -253,6 +259,11 @@ func (c *Client) listener() {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
+		}
+		if f.ModuleID != moduleIDUSP {
+			err := fmt.Errorf("received non-usp control message: %#v", f)
+			c.log(err.Error())
+			c.setLastError(err)
 		}
 		for _, msg := range f.Messages {
 			switch msg.Verb {
