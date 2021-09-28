@@ -31,16 +31,20 @@ type Client struct {
 }
 
 type Identity struct {
-	Oid          string `json:"oid" yaml:"oid"`
-	IngestionKey string `json:"ingestion_key" yaml:"ingestion_key"`
+	Oid             string `json:"oid" yaml:"oid"`
+	InstallationKey string `json:"installation_key" yaml:"installation_key"`
 }
 
 type ClientOptions struct {
 	Identity      Identity         `json:"identity" yaml:"identity"`
 	Hostname      string           `json:"hostname,omitempty" yaml:"hostname,omitempty"`
-	ParseHint     string           `json:"parse_hint,omitempty" yaml:"parse_hint,omitempty"`
+	Platform      string           `json:"platform,omitempty" yaml:"platform,omitempty"`
+	Architecture  string           `json:"architecture,omitempty" yaml:"architecture,omitempty"`
 	FormatRE      string           `json:"format_re,omitempty" yaml:"format_re,omitempty"`
 	BufferOptions AckBufferOptions `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
+
+	SensorKeyPath string `json:"sensor_key_path" yaml:"sensor_key_path"`
+	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key"`
 
 	DebugLog func(string) `json:"-" yaml:"-"`
 
@@ -49,29 +53,15 @@ type ClientOptions struct {
 }
 
 type connectionHeader struct {
-	Oid          string `json:"OID"`
-	IngestionKey string `json:"IK"`
-	Hostname     string `json:"HOST_NAME,omitempty"`
-	ParseHint    string `json:"PARSE_HINT,omitempty"`
-	FormatRE     string `json:"FORMAT_RE,omitempty"`
+	Oid             string `json:"OID"`
+	InstallationKey string `json:"IID"`
+	Hostname        string `json:"HOST_NAME,omitempty"`
+	Platform        string `json:"PLATFORM"`
+	Architecture    string `json:"ARCHITECTURE"`
+	FormatRE        string `json:"FORMAT_RE,omitempty"`
+	SensorKeyPath   string `json:"SENSOR_KEY_PATH,omitempty"`
+	SensorSeedKey   string `json:"SENSOR_SEED_KEY"`
 }
-
-type frame struct {
-	ModuleID           int8          `json:"m"`
-	Messages           []interface{} `json:"d,omitempty"`
-	CompressedMessages string        `json:"z,omitempty"`
-}
-
-type uspFrame struct {
-	ModuleID           int8                `json:"m"`
-	Messages           []uspControlMessage `json:"d,omitempty"`
-	CompressedMessages string              `json:"z,omitempty"`
-}
-
-const (
-	moduleIDHCP = 1
-	moduleIDUSP = 6
-)
 
 var ErrorBufferFull = errors.New("buffer full")
 
@@ -152,16 +142,16 @@ func (c *Client) connect() error {
 		return err
 	}
 	// Send the USP header.
-	if err := conn.WriteJSON(frame{
-		ModuleID: moduleIDHCP,
-		Messages: []interface{}{
-			connectionHeader{
-				Oid:          c.options.Identity.Oid,
-				IngestionKey: c.options.Identity.IngestionKey,
-				Hostname:     c.options.Hostname,
-				ParseHint:    c.options.ParseHint,
-				FormatRE:     c.options.FormatRE,
-			}}}); err != nil {
+	if err := conn.WriteJSON(connectionHeader{
+		Oid:             c.options.Identity.Oid,
+		InstallationKey: c.options.Identity.InstallationKey,
+		Hostname:        c.options.Hostname,
+		Platform:        c.options.Platform,
+		Architecture:    c.options.Architecture,
+		FormatRE:        c.options.FormatRE,
+		SensorKeyPath:   c.options.SensorKeyPath,
+		SensorSeedKey:   c.options.SensorSeedKey,
+	}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		conn.Close()
 		c.setLastError(err)
@@ -253,36 +243,30 @@ func (c *Client) listener() {
 	defer c.log("listener exited")
 
 	for !c.isStop.IsSet() {
-		f := uspFrame{}
+		msg := uspControlMessage{}
 		c.conn.SetReadDeadline(time.Now().Add(60 * time.Minute))
-		if err := c.conn.ReadJSON(&f); err != nil {
+		if err := c.conn.ReadJSON(&msg); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
 		}
-		if f.ModuleID != moduleIDUSP {
-			err := fmt.Errorf("received non-usp control message: %#v", f)
+
+		switch msg.Verb {
+		case uspControlMessageACK:
+			if err := c.ab.Ack(msg.SeqNum); err != nil {
+				c.setLastError(err)
+				c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
+			}
+		case uspControlMessageBACKOFF:
+			atomic.SwapUint64(&c.backoffTime, msg.Duration)
+		case uspControlMessageRECONNECT:
+			go c.Reconnect()
+			return
+		default:
+			// Ignoring unknown verbs.
+			err := fmt.Errorf("received unknown control message: %s", msg.Verb)
 			c.log(err.Error())
 			c.setLastError(err)
-		}
-		for _, msg := range f.Messages {
-			switch msg.Verb {
-			case uspControlMessageACK:
-				if err := c.ab.Ack(msg.SeqNum); err != nil {
-					c.setLastError(err)
-					c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
-				}
-			case uspControlMessageBACKOFF:
-				atomic.SwapUint64(&c.backoffTime, msg.Duration)
-			case uspControlMessageRECONNECT:
-				go c.Reconnect()
-				return
-			default:
-				// Ignoring unknown verbs.
-				err := fmt.Errorf("received unknown control message: %s", msg.Verb)
-				c.log(err.Error())
-				c.setLastError(err)
-			}
 		}
 	}
 }
@@ -301,23 +285,9 @@ func (c *Client) sender() {
 		if message == nil {
 			continue
 		}
-		// We will have at least one message ready to go.
-		messages := []interface{}{message}
-		for len(messages) < 1000 {
-			// Add more messages to the frame as long as
-			// they're ready to go.
-			message := c.ab.GetNextToDeliver(0)
-			if message == nil {
-				break
-			}
-			messages = append(messages, message)
-		}
-		// batch messages together and write frames
+
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := c.conn.WriteJSON(frame{
-			ModuleID: moduleIDUSP,
-			Messages: messages,
-		}); err != nil {
+		if err := c.conn.WriteJSON(message); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
@@ -334,10 +304,7 @@ func (c *Client) keepAliveSender() {
 		}
 
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := c.conn.WriteJSON(frame{
-			ModuleID: moduleIDUSP,
-			Messages: []interface{}{},
-		}); err != nil {
+		if err := c.conn.WriteJSON(map[string]interface{}{}); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
