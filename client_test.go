@@ -1,7 +1,6 @@
 package uspclient
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -21,9 +20,10 @@ var wsUpgrader = websocket.Upgrader{
 
 func TestConnection(t *testing.T) {
 	testOID := uuid.NewString()
-	testIK := "456"
+	testIID := "456"
 	testHostname := "testhost"
-	testHint := "hint"
+	testPlatform := "text"
+	testArchitecture := "usp_adapter"
 	testPort := 7777
 	nConnections := uint32(0)
 	wg := sync.WaitGroup{}
@@ -56,24 +56,21 @@ func TestConnection(t *testing.T) {
 		}
 
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		f := frame{}
-		if err := conn.ReadJSON(&f); err != nil {
+		msg := connectionHeader{}
+		if err := conn.ReadJSON(&msg); err != nil {
 			t.Errorf("ReadJSON(): %v", err)
 			return
 		}
-		if len(f.Messages) == 0 {
-			t.Error("not enough messages")
-			return
-		}
-		msg := f.Messages[0].(map[string]interface{})
 		isHeaderReceived = true
 
-		oid, _ := msg["OID"].(string)
-		ik, _ := msg["IK"].(string)
-		hostname, _ := msg["HOST_NAME"].(string)
-		hint, _ := msg["PARSE_HINT"].(string)
+		oid := msg.Oid
+		iid := msg.InstallationKey
+		hostname := msg.Hostname
+		hint := msg.Platform
+		arch := msg.Architecture
 
-		if oid != testOID || ik != testIK || hostname != testHostname || hint != testHint {
+		if oid != testOID || iid != testIID || hostname != testHostname || hint != testPlatform || arch != testArchitecture {
+			fmt.Printf("invalid headers: %#v\n", msg)
 			return
 		}
 		isHeaderValid = true
@@ -90,11 +87,9 @@ func TestConnection(t *testing.T) {
 				m.Lock()
 				defer m.Unlock()
 				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				if err := conn.WriteJSON(frame{
-					ModuleID: moduleIDUSP,
-					Messages: []interface{}{&uspControlMessage{
-						Verb: uspControlMessageRECONNECT,
-					}}}); err != nil {
+				if err := conn.WriteJSON(uspControlMessage{
+					Verb: uspControlMessageRECONNECT,
+				}); err != nil {
 					fmt.Printf("WriteJSON(): %v\n", err)
 					return
 				}
@@ -103,39 +98,28 @@ func TestConnection(t *testing.T) {
 
 		for {
 			conn.SetReadDeadline(time.Now().Add(20 * time.Second))
-			f := frame{}
-			if err := conn.ReadJSON(&f); err != nil {
+			msg := UspDataMessage{}
+			if err := conn.ReadJSON(&msg); err != nil {
 				fmt.Printf("ReadJSON(): %v\n", err)
 				return
 			}
-			if len(f.Messages) == 0 {
-				t.Error("missing messages")
-				return
-			}
-			for _, nm := range f.Messages {
-				uMsg := UspDataMessage{}
-				d, _ := json.Marshal(nm)
-				json.Unmarshal(d, &uMsg)
 
-				if uMsg.AckRequested {
-					m.Lock()
-					conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-					if err := conn.WriteJSON(frame{
-						ModuleID: moduleIDUSP,
-						Messages: []interface{}{&uspControlMessage{
-							Verb:   uspControlMessageACK,
-							SeqNum: uMsg.SeqNum,
-						}}}); err != nil {
-						fmt.Printf("WriteJSON(): %v\n", err)
-						m.Unlock()
-						return
-					}
+			if msg.AckRequested {
+				m.Lock()
+				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				if err := conn.WriteJSON(&uspControlMessage{
+					Verb:   uspControlMessageACK,
+					SeqNum: msg.SeqNum,
+				}); err != nil {
+					fmt.Printf("WriteJSON(): %v\n", err)
 					m.Unlock()
-				}
-				if v, ok := uMsg.JsonPayload["some"]; !ok || v != "payload" {
-					t.Error("missing payload")
 					return
 				}
+				m.Unlock()
+			}
+			if v, ok := msg.JsonPayload["some"]; !ok || v != "payload" {
+				t.Errorf("missing payload: %#v", msg)
+				return
 			}
 		}
 	})
@@ -155,12 +139,13 @@ func TestConnection(t *testing.T) {
 
 	c, err := NewClient(ClientOptions{
 		Identity: Identity{
-			Oid:          testOID,
-			IngestionKey: testIK,
+			Oid:             testOID,
+			InstallationKey: testIID,
 		},
-		DestURL:   fmt.Sprintf("ws://127.0.0.1:%d/usp", testPort),
-		Hostname:  testHostname,
-		ParseHint: testHint,
+		DestURL:      fmt.Sprintf("ws://127.0.0.1:%d/usp", testPort),
+		Hostname:     testHostname,
+		Platform:     testPlatform,
+		Architecture: testArchitecture,
 		DebugLog: func(s string) {
 			fmt.Println(s)
 		},
