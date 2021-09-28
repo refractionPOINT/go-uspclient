@@ -28,9 +28,10 @@ type UspDataMessage struct {
 }
 
 type uspControlMessage struct {
-	Verb string `json:"v"`
+	Verb string `json:"v" msgpack:"v"`
 
 	// Optional components depending on verb.
-	SeqNum   uint64 `json:"x"`
-	Duration uint64 `json:"dur"`
+	SeqNum   uint64 `json:"x,omitempty" msgpack:"x,omitempty"`
+	Duration uint64 `json:"dur,omitempty" msgpack:"dur,omitempty"`
+	Error    string `json:"err,omitempty" msgpack:"err,omitempty"`
 }

@@ -262,6 +262,8 @@ func (c *Client) listener() {
 		case uspControlMessageRECONNECT:
 			go c.Reconnect()
 			return
+		case uspControlMessageERROR:
+			c.log(fmt.Sprintf("receive error from LimaCharlie: %s", msg.Error))
 		default:
 			// Ignoring unknown verbs.
 			err := fmt.Errorf("received unknown control message: %s", msg.Verb)
