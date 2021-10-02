@@ -153,6 +153,7 @@ func (c *Client) connect() error {
 		SensorSeedKey:   c.options.SensorSeedKey,
 	}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
+		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
 		conn.Close()
 		c.setLastError(err)
 		return err
@@ -183,6 +184,7 @@ func (c *Client) disconnect() error {
 	c.isStop.Set()
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
+	c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
 	err := c.conn.Close()
 	c.wg.Wait()
 	if err != nil {
@@ -305,8 +307,7 @@ func (c *Client) keepAliveSender() {
 			return
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := c.conn.WriteJSON(map[string]interface{}{}); err != nil {
+		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
