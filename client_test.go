@@ -16,6 +16,7 @@ var wsUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+	EnableCompression: true,
 }
 
 func TestConnection(t *testing.T) {
