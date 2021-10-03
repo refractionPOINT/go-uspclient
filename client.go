@@ -11,6 +11,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	lc "github.com/refractionPOINT/go-limacharlie/limacharlie"
+	"github.com/refractionPOINT/go-uspclient/protocol"
 )
 
 type Client struct {
@@ -50,17 +51,6 @@ type ClientOptions struct {
 
 	// Auto-detect if not specified (preferred).
 	DestURL string `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
-}
-
-type connectionHeader struct {
-	Oid             string `json:"OID"`
-	InstallationKey string `json:"IID"`
-	Hostname        string `json:"HOST_NAME,omitempty"`
-	Platform        string `json:"PLATFORM"`
-	Architecture    string `json:"ARCHITECTURE"`
-	FormatRE        string `json:"FORMAT_RE,omitempty"`
-	SensorKeyPath   string `json:"SENSOR_KEY_PATH,omitempty"`
-	SensorSeedKey   string `json:"SENSOR_SEED_KEY"`
 }
 
 var ErrorBufferFull = errors.New("buffer full")
@@ -117,7 +107,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 	return c, nil
 }
 
-func (c *Client) Close() ([]*UspDataMessage, error) {
+func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	c.log("usp-client closing")
 	err1 := c.disconnect()
 	messages, err2 := c.ab.GetUnAcked()
@@ -142,7 +132,7 @@ func (c *Client) connect() error {
 		return err
 	}
 	// Send the USP header.
-	if err := conn.WriteJSON(connectionHeader{
+	if err := conn.WriteJSON(protocol.ConnectionHeader{
 		Oid:             c.options.Identity.Oid,
 		InstallationKey: c.options.Identity.InstallationKey,
 		Hostname:        c.options.Hostname,
@@ -224,7 +214,7 @@ func (c *Client) Reconnect() (bool, error) {
 	return true, err
 }
 
-func (c *Client) Ship(message *UspDataMessage, timeout time.Duration) error {
+func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) error {
 	if !c.ab.Add(message, timeout) {
 		return ErrorBufferFull
 	}
@@ -232,7 +222,7 @@ func (c *Client) Ship(message *UspDataMessage, timeout time.Duration) error {
 	return nil
 }
 
-func (c *Client) GetUnsent() ([]*UspDataMessage, error) {
+func (c *Client) GetUnsent() ([]*protocol.DataMessage, error) {
 	messages, err := c.ab.GetUnAcked()
 	if err != nil {
 		c.setLastError(err)
@@ -245,7 +235,7 @@ func (c *Client) listener() {
 	defer c.log("listener exited")
 
 	for !c.isStop.IsSet() {
-		msg := uspControlMessage{}
+		msg := protocol.ControlMessage{}
 		c.conn.SetReadDeadline(time.Now().Add(60 * time.Minute))
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			c.setLastError(err)
@@ -254,17 +244,17 @@ func (c *Client) listener() {
 		}
 
 		switch msg.Verb {
-		case uspControlMessageACK:
+		case protocol.ControlMessageACK:
 			if err := c.ab.Ack(msg.SeqNum); err != nil {
 				c.setLastError(err)
 				c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
 			}
-		case uspControlMessageBACKOFF:
+		case protocol.ControlMessageBACKOFF:
 			atomic.SwapUint64(&c.backoffTime, msg.Duration)
-		case uspControlMessageRECONNECT:
+		case protocol.ControlMessageRECONNECT:
 			go c.Reconnect()
 			return
-		case uspControlMessageERROR:
+		case protocol.ControlMessageERROR:
 			c.log(fmt.Sprintf("receive error from LimaCharlie: %s", msg.Error))
 		default:
 			// Ignoring unknown verbs.

@@ -5,6 +5,8 @@ import (
 	"math"
 	"sync"
 	"time"
+
+	"github.com/refractionPOINT/go-uspclient/protocol"
 )
 
 const (
@@ -21,7 +23,7 @@ type AckBuffer struct {
 
 	isAvailable *Event
 
-	buff          []*UspDataMessage
+	buff          []*protocol.DataMessage
 	nextIndexFree uint64
 	firstSeqNum   uint64
 	nextSeqNum    uint64
@@ -36,7 +38,7 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 		o.BufferCapacity = defaultCapacity
 	}
 	b := &AckBuffer{
-		buff:             make([]*UspDataMessage, o.BufferCapacity),
+		buff:             make([]*protocol.DataMessage, o.BufferCapacity),
 		ackEvery:         uint64(float64(o.BufferCapacity) * ackPercentOfCapacity),
 		isAvailable:      NewEvent(),
 		firstSeqNum:      1,
@@ -48,7 +50,7 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 	return b, nil
 }
 
-func (b *AckBuffer) Add(e *UspDataMessage, timeout time.Duration) bool {
+func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 	hasBeenAdded := false
 	var deadline time.Time
 	if timeout != 0 {
@@ -125,15 +127,15 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	return nil
 }
 
-func (b *AckBuffer) GetUnAcked() ([]*UspDataMessage, error) {
+func (b *AckBuffer) GetUnAcked() ([]*protocol.DataMessage, error) {
 	b.RLock()
 	defer b.RUnlock()
-	out := make([]*UspDataMessage, b.nextIndexFree)
+	out := make([]*protocol.DataMessage, b.nextIndexFree)
 	copy(out, b.buff[:b.nextIndexFree])
 	return out, nil
 }
 
-func (b *AckBuffer) GetNextToDeliver(timeout time.Duration) *UspDataMessage {
+func (b *AckBuffer) GetNextToDeliver(timeout time.Duration) *protocol.DataMessage {
 	if !b.isReadyToDeliver.WaitFor(timeout) {
 		return nil
 	}

@@ -1,13 +1,13 @@
-package uspclient
+package protocol
 
 const (
-	uspControlMessageACK       = "ack"
-	uspControlMessageBACKOFF   = "bo"
-	uspControlMessageRECONNECT = "re"
-	uspControlMessageERROR     = "error"
+	ControlMessageACK       = "ack"
+	ControlMessageBACKOFF   = "bo"
+	ControlMessageRECONNECT = "re"
+	ControlMessageERROR     = "error"
 )
 
-type UspDataMessage struct {
+type DataMessage struct {
 	SeqNum       uint64 `json:"x" msgpack:"x"`                     // Populated by the USP Client.
 	AckRequested bool   `json:"a,omitempty" msgpack:"a,omitempty"` // Populated by the USP Client.
 
@@ -27,7 +27,7 @@ type UspDataMessage struct {
 	InvestigationID string `json:"inv,omitempty" msgpack:"inv,omitempty"`
 }
 
-type uspControlMessage struct {
+type ControlMessage struct {
 	Verb string `json:"v" msgpack:"v"`
 
 	// Optional components depending on verb.
