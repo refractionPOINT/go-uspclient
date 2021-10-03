@@ -4,6 +4,8 @@ import (
 	"math"
 	"testing"
 	"time"
+
+	"github.com/refractionPOINT/go-uspclient/protocol"
 )
 
 func TestAckBufferBasics(t *testing.T) {
@@ -17,13 +19,13 @@ func TestAckBufferBasics(t *testing.T) {
 	if b.isReadyToDeliver.IsSet() {
 		t.Error("should not be ready to deliver")
 	}
-	if !b.Add(&UspDataMessage{}, 0) {
+	if !b.Add(&protocol.DataMessage{}, 0) {
 		t.Error("unexpected failed add")
 	}
-	if !b.Add(&UspDataMessage{}, 0) {
+	if !b.Add(&protocol.DataMessage{}, 0) {
 		t.Error("unexpected failed add")
 	}
-	if !b.Add(&UspDataMessage{}, 0) {
+	if !b.Add(&protocol.DataMessage{}, 0) {
 		t.Error("unexpected failed add")
 	}
 
@@ -97,7 +99,7 @@ func TestAckBufferWaits(t *testing.T) {
 
 	go func() {
 		time.Sleep(2 * time.Second)
-		if !b.Add(&UspDataMessage{}, 0) {
+		if !b.Add(&protocol.DataMessage{}, 0) {
 			t.Errorf("failed to add")
 		}
 	}()
@@ -106,10 +108,10 @@ func TestAckBufferWaits(t *testing.T) {
 		t.Error("expected a delayed delivery")
 	}
 
-	if !b.Add(&UspDataMessage{}, 0) {
+	if !b.Add(&protocol.DataMessage{}, 0) {
 		t.Error("failed to add")
 	}
-	if !b.Add(&UspDataMessage{}, 0) {
+	if !b.Add(&protocol.DataMessage{}, 0) {
 		t.Error("failed to add")
 	}
 
@@ -120,7 +122,7 @@ func TestAckBufferWaits(t *testing.T) {
 		}
 	}()
 
-	if !b.Add(&UspDataMessage{}, 5*time.Second) {
+	if !b.Add(&protocol.DataMessage{}, 5*time.Second) {
 		t.Error("expected a delayed add")
 	}
 }
@@ -138,7 +140,7 @@ func TestAckBufferBoundaries(t *testing.T) {
 	b.nextSeqNum = math.MaxUint64 - 3
 
 	for i := 0; i < 10; i++ {
-		if !b.Add(&UspDataMessage{}, 0) {
+		if !b.Add(&protocol.DataMessage{}, 0) {
 			t.Error("failed to add")
 		}
 	}
@@ -173,7 +175,7 @@ func TestAckBufferBoundaries(t *testing.T) {
 	b.nextSeqNum = math.MaxUint64 - 3
 
 	for i := 0; i < 10; i++ {
-		if !b.Add(&UspDataMessage{}, 0) {
+		if !b.Add(&protocol.DataMessage{}, 0) {
 			t.Error("failed to add")
 		}
 	}
@@ -208,7 +210,7 @@ func TestAckBufferBoundaries(t *testing.T) {
 	b.nextSeqNum = math.MaxUint64 - 3
 
 	for i := 0; i < 10; i++ {
-		if !b.Add(&UspDataMessage{}, 0) {
+		if !b.Add(&protocol.DataMessage{}, 0) {
 			t.Error("failed to add")
 		}
 	}

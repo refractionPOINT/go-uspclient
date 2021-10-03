@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/refractionPOINT/go-uspclient/protocol"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -57,7 +58,7 @@ func TestConnection(t *testing.T) {
 		}
 
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		msg := connectionHeader{}
+		msg := protocol.ConnectionHeader{}
 		if err := conn.ReadJSON(&msg); err != nil {
 			t.Errorf("ReadJSON(): %v", err)
 			return
@@ -88,8 +89,8 @@ func TestConnection(t *testing.T) {
 				m.Lock()
 				defer m.Unlock()
 				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				if err := conn.WriteJSON(uspControlMessage{
-					Verb: uspControlMessageRECONNECT,
+				if err := conn.WriteJSON(protocol.ControlMessage{
+					Verb: protocol.ControlMessageRECONNECT,
 				}); err != nil {
 					fmt.Printf("WriteJSON(): %v\n", err)
 					return
@@ -99,7 +100,7 @@ func TestConnection(t *testing.T) {
 
 		for {
 			conn.SetReadDeadline(time.Now().Add(20 * time.Second))
-			msg := UspDataMessage{}
+			msg := protocol.DataMessage{}
 			if err := conn.ReadJSON(&msg); err != nil {
 				fmt.Printf("ReadJSON(): %v\n", err)
 				return
@@ -108,8 +109,8 @@ func TestConnection(t *testing.T) {
 			if msg.AckRequested {
 				m.Lock()
 				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				if err := conn.WriteJSON(&uspControlMessage{
-					Verb:   uspControlMessageACK,
+				if err := conn.WriteJSON(&protocol.ControlMessage{
+					Verb:   protocol.ControlMessageACK,
 					SeqNum: msg.SeqNum,
 				}); err != nil {
 					fmt.Printf("WriteJSON(): %v\n", err)
@@ -162,7 +163,7 @@ func TestConnection(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	for i := 0; i < 30; i++ {
-		if err := c.Ship(&UspDataMessage{
+		if err := c.Ship(&protocol.DataMessage{
 			JsonPayload: map[string]interface{}{
 				"some": "payload",
 			},
