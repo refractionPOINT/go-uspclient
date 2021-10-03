@@ -37,12 +37,12 @@ type Identity struct {
 }
 
 type ClientOptions struct {
-	Identity      Identity                   `json:"identity" yaml:"identity"`
-	Hostname      string                     `json:"hostname,omitempty" yaml:"hostname,omitempty"`
-	Platform      string                     `json:"platform,omitempty" yaml:"platform,omitempty"`
-	Architecture  string                     `json:"architecture,omitempty" yaml:"architecture,omitempty"`
-	Mapping       protocol.MappingDescriptor `json:"mapping,omitempty" yaml:"mapping,omitempty"`
-	BufferOptions AckBufferOptions           `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
+	Identity      Identity                    `json:"identity" yaml:"identity"`
+	Hostname      string                      `json:"hostname,omitempty" yaml:"hostname,omitempty"`
+	Platform      string                      `json:"platform,omitempty" yaml:"platform,omitempty"`
+	Architecture  string                      `json:"architecture,omitempty" yaml:"architecture,omitempty"`
+	Mapping       *protocol.MappingDescriptor `json:"mapping,omitempty" yaml:"mapping,omitempty"`
+	BufferOptions AckBufferOptions            `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
 
 	SensorKeyPath string `json:"sensor_key_path" yaml:"sensor_key_path"`
 	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key"`
@@ -83,7 +83,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 		o.Hostname, _ = os.Hostname()
 	}
 
-	if o.Mapping.ParsingRE != "" {
+	if o.Mapping != nil && o.Mapping.ParsingRE != "" {
 		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {
 			return nil, fmt.Errorf("invalid mapping.parsing_re: %v", err)
 		}
