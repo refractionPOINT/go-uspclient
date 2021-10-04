@@ -9,6 +9,10 @@ type MappingDescriptor struct {
 	// indicates unique values to become Sensor IDs.
 	SensorKeyPath string `json:"SENSOR_KEY_PATH,omitempty"`
 
+	// Path to the component of the JSON events that
+	// indicates the hostname of the sensor per the SensorKeyPath.
+	SensorHostnamePath string `json:"SENSOR_HOSTNAME_PATH,omitempty`
+
 	// Rename the fields in the Mappings but leave
 	// all other fields in place. The default behavior
 	// is to replace the final event with only the
