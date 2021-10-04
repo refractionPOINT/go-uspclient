@@ -1,6 +1,11 @@
 package protocol
 
+const (
+	CurrentVersion = 1
+)
+
 type ConnectionHeader struct {
+	Version         int               `json:"VERSION"`
 	Oid             string            `json:"OID"`
 	InstallationKey string            `json:"IID"`
 	Hostname        string            `json:"HOST_NAME,omitempty"`
