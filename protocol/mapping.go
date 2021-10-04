@@ -1,5 +1,14 @@
 package protocol
 
+// Whenever a value references a "Path", it means the value is a
+// string representing where to find a specific field recursively
+// in the JSON event, separated by "/".
+// For example, the event:
+// {
+//   "some": {"my-val": "here"}
+// }
+// could define the Path "some/my-val" which would have the value "here".
+
 type MappingDescriptor struct {
 	// Use the named capture fields from the regular
 	// expression below to parse text lines into JSON.
@@ -12,6 +21,14 @@ type MappingDescriptor struct {
 	// Path to the component of the JSON events that
 	// indicates the hostname of the sensor per the SensorKeyPath.
 	SensorHostnamePath string `json:"SENSOR_HOSTNAME_PATH,omitempty"`
+
+	// Path to the component that should be used as
+	// the Event Type of a specific event.
+	EventTypePath string `json:"EVENT_TYPE_PATH,omitempty"`
+
+	// Path to the component that should be used as
+	// the Event Time (converted to a ms epoch).
+	EventTimePath string `json:"EVENT_TIME_PATH,omitempty"`
 
 	// Rename the fields in the Mappings but leave
 	// all other fields in place. The default behavior

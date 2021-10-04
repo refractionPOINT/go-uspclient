@@ -133,6 +133,7 @@ func (c *Client) connect() error {
 	}
 	// Send the USP header.
 	if err := conn.WriteJSON(protocol.ConnectionHeader{
+		Version:         protocol.CurrentVersion,
 		Oid:             c.options.Identity.Oid,
 		InstallationKey: c.options.Identity.InstallationKey,
 		Hostname:        c.options.Hostname,
