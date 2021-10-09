@@ -16,19 +16,19 @@ type MappingDescriptor struct {
 
 	// Path to the component of the JSON events that
 	// indicates unique values to become Sensor IDs.
-	SensorKeyPath string `json:"SENSOR_KEY_PATH,omitempty"`
+	SensorKeyPath string `json:"SENSOR_KEY_PATH,omitempty" yaml:"sensor_key_path,omitempty"`
 
 	// Path to the component of the JSON events that
 	// indicates the hostname of the sensor per the SensorKeyPath.
-	SensorHostnamePath string `json:"SENSOR_HOSTNAME_PATH,omitempty"`
+	SensorHostnamePath string `json:"SENSOR_HOSTNAME_PATH,omitempty" yaml:"sensor_hostname_path,omitempty"`
 
 	// Path to the component that should be used as
 	// the Event Type of a specific event.
-	EventTypePath string `json:"EVENT_TYPE_PATH,omitempty"`
+	EventTypePath string `json:"EVENT_TYPE_PATH,omitempty" yaml:"event_type_path,omitempty"`
 
 	// Path to the component that should be used as
 	// the Event Time (converted to a ms epoch).
-	EventTimePath string `json:"EVENT_TIME_PATH,omitempty"`
+	EventTimePath string `json:"EVENT_TIME_PATH,omitempty" yaml:"event_time_path,omitempty"`
 
 	// Rename the fields in the Mappings but leave
 	// all other fields in place. The default behavior
