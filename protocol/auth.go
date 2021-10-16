@@ -5,12 +5,12 @@ const (
 )
 
 type ConnectionHeader struct {
-	Version         int               `json:"VERSION"`
-	Oid             string            `json:"OID"`
-	InstallationKey string            `json:"IID"`
-	Hostname        string            `json:"HOST_NAME,omitempty"`
-	Platform        string            `json:"PLATFORM"`
-	Architecture    string            `json:"ARCHITECTURE"`
-	Mapping         MappingDescriptor `json:"MAPPING,omitempty"`
-	SensorSeedKey   string            `json:"SENSOR_SEED_KEY"`
+	Version         int               `json:"version"`
+	Oid             string            `json:"oid"`
+	InstallationKey string            `json:"iid"`
+	Hostname        string            `json:"host_name,omitempty"`
+	Platform        string            `json:"platform"`
+	Architecture    string            `json:"architecture"`
+	Mapping         MappingDescriptor `json:"mapping,omitempty"`
+	SensorSeedKey   string            `json:"sensor_seed_key"`
 }
