@@ -10,7 +10,7 @@ package protocol
 // could define the Path "some/my-val" which would have the value "here".
 
 type MappingDescriptor struct {
-	// Use the named capture fields from the regular
+	// Use the named capture groups from the regular
 	// expression below to parse text lines into JSON.
 	ParsingRE string `json:"parsing_re,omitempty" yaml:"parsing_re,omitempty"`
 
