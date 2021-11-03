@@ -23,6 +23,7 @@ type AckBufferOptions struct {
 type AckBuffer struct {
 	sync.RWMutex
 
+	isRunning   bool
 	isAvailable *Event
 
 	buff          []*protocol.DataMessage
@@ -45,6 +46,7 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 	b := &AckBuffer{
 		buff:             make([]*protocol.DataMessage, o.BufferCapacity),
 		ackEvery:         uint64(float64(o.BufferCapacity) * ackPercentOfCapacity),
+		isRunning:        true,
 		isAvailable:      NewEvent(),
 		firstSeqNum:      1,
 		nextSeqNum:       1,
@@ -55,6 +57,12 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 	b.isAvailable.Set()
 
 	return b, nil
+}
+
+func (b *AckBuffer) Close() {
+	b.Lock()
+	defer b.Unlock()
+	b.isRunning = false
 }
 
 func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
@@ -75,12 +83,15 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 			if !b.isAvailable.WaitFor(deadline.Sub(now)) {
 				break
 			}
+		} else {
+			b.isAvailable.WaitFor(500 * time.Millisecond)
 		}
 
 		b.Lock()
 		if !b.isAvailable.IsSet() {
+			isRunning := b.isRunning
 			b.Unlock()
-			if deadline.IsZero() {
+			if deadline.IsZero() && isRunning {
 				continue
 			}
 			break
