@@ -10,8 +10,8 @@ import (
 )
 
 const (
-	defaultCapacity      = 1000
-	ackPercentOfCapacity = 0.9
+	defaultCapacity      = 5000
+	ackPercentOfCapacity = 0.5
 )
 
 type AckBufferOptions struct {
