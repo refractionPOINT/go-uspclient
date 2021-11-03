@@ -1,6 +1,9 @@
 package uspclient
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -131,6 +134,7 @@ func (c *Client) connect() error {
 		c.setLastError(err)
 		return err
 	}
+
 	// Send the USP header.
 	if err := conn.WriteJSON(protocol.ConnectionHeader{
 		Version:         protocol.CurrentVersion,
@@ -141,6 +145,7 @@ func (c *Client) connect() error {
 		Architecture:    c.options.Architecture,
 		Mapping:         c.options.Mapping,
 		SensorSeedKey:   c.options.SensorSeedKey,
+		IsCompressed:    true,
 	}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
@@ -280,8 +285,21 @@ func (c *Client) sender() {
 			continue
 		}
 
+		// Apply compression if not done already.
+		b := bytes.Buffer{}
+		z := gzip.NewWriter(&b)
+		j := json.NewEncoder(z)
+		if err := j.Encode(message); err != nil {
+			c.setLastError(err)
+			continue
+		}
+		if err := z.Close(); err != nil {
+			c.setLastError(err)
+			continue
+		}
+
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-		if err := c.conn.WriteJSON(message); err != nil {
+		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.setLastError(err)
 			go c.Reconnect()
 			return
