@@ -13,4 +13,5 @@ type ConnectionHeader struct {
 	Architecture    string            `json:"architecture"`
 	Mapping         MappingDescriptor `json:"mapping,omitempty"`
 	SensorSeedKey   string            `json:"sensor_seed_key"`
+	IsCompressed    bool              `json:"is_compressed"`
 }

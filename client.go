@@ -145,6 +145,7 @@ func (c *Client) connect() error {
 		Architecture:    c.options.Architecture,
 		Mapping:         c.options.Mapping,
 		SensorSeedKey:   c.options.SensorSeedKey,
+		IsCompressed:    true,
 	}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
