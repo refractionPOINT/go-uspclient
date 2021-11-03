@@ -17,11 +17,13 @@ const (
 type AckBufferOptions struct {
 	BufferCapacity uint64 `json:"buffer_capacity" yaml:"buffer_capacity"`
 	OnBackPressure func() `json:"-" yaml:"-"`
+	OnAck          func() `json:"-" yaml:"-"`
 }
 
 type AckBuffer struct {
 	sync.RWMutex
 
+	isRunning   bool
 	isAvailable *Event
 
 	buff          []*protocol.DataMessage
@@ -34,6 +36,7 @@ type AckBuffer struct {
 	isReadyToDeliver   *Event
 
 	onBackPressure func()
+	onAck          func()
 }
 
 func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
@@ -43,15 +46,23 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 	b := &AckBuffer{
 		buff:             make([]*protocol.DataMessage, o.BufferCapacity),
 		ackEvery:         uint64(float64(o.BufferCapacity) * ackPercentOfCapacity),
+		isRunning:        true,
 		isAvailable:      NewEvent(),
 		firstSeqNum:      1,
 		nextSeqNum:       1,
 		isReadyToDeliver: NewEvent(),
 		onBackPressure:   o.OnBackPressure,
+		onAck:            o.OnAck,
 	}
 	b.isAvailable.Set()
 
 	return b, nil
+}
+
+func (b *AckBuffer) Close() {
+	b.Lock()
+	defer b.Unlock()
+	b.isRunning = false
 }
 
 func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
@@ -72,12 +83,15 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 			if !b.isAvailable.WaitFor(deadline.Sub(now)) {
 				break
 			}
+		} else {
+			b.isAvailable.WaitFor(500 * time.Millisecond)
 		}
 
 		b.Lock()
 		if !b.isAvailable.IsSet() {
+			isRunning := b.isRunning
 			b.Unlock()
-			if !deadline.IsZero() {
+			if deadline.IsZero() && isRunning {
 				continue
 			}
 			break
@@ -102,6 +116,9 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 }
 
 func (b *AckBuffer) Ack(seq uint64) error {
+	if b.onAck != nil {
+		b.onAck()
+	}
 	b.Lock()
 	defer b.Unlock()
 	if seq < b.firstSeqNum && uint64(len(b.buff))-(math.MaxUint64-b.firstSeqNum) <= seq {
