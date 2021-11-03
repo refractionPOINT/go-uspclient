@@ -17,6 +17,7 @@ const (
 type AckBufferOptions struct {
 	BufferCapacity uint64 `json:"buffer_capacity" yaml:"buffer_capacity"`
 	OnBackPressure func() `json:"-" yaml:"-"`
+	OnAck          func() `json:"-" yaml:"-"`
 }
 
 type AckBuffer struct {
@@ -34,6 +35,7 @@ type AckBuffer struct {
 	isReadyToDeliver   *Event
 
 	onBackPressure func()
+	onAck          func()
 }
 
 func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
@@ -48,6 +50,7 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 		nextSeqNum:       1,
 		isReadyToDeliver: NewEvent(),
 		onBackPressure:   o.OnBackPressure,
+		onAck:            o.OnAck,
 	}
 	b.isAvailable.Set()
 
@@ -77,7 +80,7 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 		b.Lock()
 		if !b.isAvailable.IsSet() {
 			b.Unlock()
-			if !deadline.IsZero() {
+			if deadline.IsZero() {
 				continue
 			}
 			break
@@ -102,6 +105,9 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 }
 
 func (b *AckBuffer) Ack(seq uint64) error {
+	if b.onAck != nil {
+		b.onAck()
+	}
 	b.Lock()
 	defer b.Unlock()
 	if seq < b.firstSeqNum && uint64(len(b.buff))-(math.MaxUint64-b.firstSeqNum) <= seq {
