@@ -1,6 +1,9 @@
 package uspclient
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -100,9 +103,22 @@ func TestConnection(t *testing.T) {
 
 		for {
 			conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+			_, p, err := conn.ReadMessage()
+			if err != nil {
+				fmt.Printf("ReadMessage(): %v\n", err)
+				return
+			}
+			b := bytes.NewBuffer(p)
+			z, err := gzip.NewReader(b)
+			if err != nil {
+				fmt.Printf("gzip.NewReader(): %v\n", err)
+				return
+			}
+			j := json.NewDecoder(z)
+
 			msg := protocol.DataMessage{}
-			if err := conn.ReadJSON(&msg); err != nil {
-				fmt.Printf("ReadJSON(): %v\n", err)
+			if err := j.Decode(&msg); err != nil {
+				fmt.Printf("json.Decode(): %v\n", err)
 				return
 			}
 
