@@ -14,4 +14,5 @@ type ConnectionHeader struct {
 	Mapping         MappingDescriptor `json:"mapping,omitempty"`
 	SensorSeedKey   string            `json:"sensor_seed_key"`
 	IsCompressed    bool              `json:"is_compressed"`
+	DataFormat      string            `json:"data_format"` // LimaCharlie supports "msgpack" or "json"
 }

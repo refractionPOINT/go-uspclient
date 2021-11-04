@@ -3,7 +3,6 @@ package uspclient
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +14,8 @@ import (
 	"github.com/gorilla/websocket"
 	lc "github.com/refractionPOINT/go-limacharlie/limacharlie"
 	"github.com/refractionPOINT/go-uspclient/protocol"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 type Client struct {
@@ -146,6 +147,7 @@ func (c *Client) connect() error {
 		Mapping:         c.options.Mapping,
 		SensorSeedKey:   c.options.SensorSeedKey,
 		IsCompressed:    true,
+		DataFormat:      "msgpack",
 	}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
 		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
@@ -288,8 +290,8 @@ func (c *Client) sender() {
 		// Apply compression if not done already.
 		b := bytes.Buffer{}
 		z := gzip.NewWriter(&b)
-		j := json.NewEncoder(z)
-		if err := j.Encode(message); err != nil {
+		m := msgpack.NewEncoder(z)
+		if err := m.Encode(message); err != nil {
 			c.setLastError(err)
 			continue
 		}
