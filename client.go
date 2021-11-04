@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"sync"
@@ -290,15 +291,25 @@ func (c *Client) sender() {
 
 		// Apply compression if not done already.
 		b := bytes.Buffer{}
-		z := gzip.NewWriter(&b)
-		m := msgpack.NewEncoder(z)
+		var (
+			z *gzip.Writer
+			w io.Writer
+		)
+		w = &b
+		if c.options.IsCompressed {
+			z = gzip.NewWriter(w)
+			w = z
+		}
+		m := msgpack.NewEncoder(w)
 		if err := m.Encode(message); err != nil {
 			c.setLastError(err)
 			continue
 		}
-		if err := z.Close(); err != nil {
-			c.setLastError(err)
-			continue
+		if z != nil {
+			if err := z.Close(); err != nil {
+				c.setLastError(err)
+				continue
+			}
 		}
 
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
