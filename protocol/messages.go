@@ -12,9 +12,11 @@ type DataMessage struct {
 	AckRequested bool   `json:"a,omitempty" msgpack:"a,omitempty"` // Populated by the USP Client.
 
 	// One of, payload format.
-	TextPayload   string                 `json:"t,omitempty" msgpack:"t,omitempty"`
-	JsonPayload   map[string]interface{} `json:"j,omitempty" msgpack:"j,omitempty"`
-	BinaryPayload string                 `json:"b,omitempty" msgpack:"b,omitempty"`
+	TextPayload             string                 `json:"t,omitempty" msgpack:"t,omitempty"`
+	JsonPayload             map[string]interface{} `json:"j,omitempty" msgpack:"j,omitempty"`
+	BinaryPayload           string                 `json:"b,omitempty" msgpack:"b,omitempty"`
+	BundlePayload           []byte                 `json:"-" msgpack:"o,omitempty"` // Bundle of records
+	CompressedBundlePayload []byte                 `json:"-" msgpack:"p,omitempty"` // Compressed bundle or records
 
 	// Basic event metadata.
 	EventType   string `json:"e,omitempty" msgpack:"e,omitempty"`
@@ -28,10 +30,10 @@ type DataMessage struct {
 }
 
 type ControlMessage struct {
-	Verb string `json:"v" msgpack:"v"`
+	Verb string `json:"v"`
 
 	// Optional components depending on verb.
-	SeqNum   uint64 `json:"x,omitempty" msgpack:"x,omitempty"`
-	Duration uint64 `json:"dur,omitempty" msgpack:"dur,omitempty"`
-	Error    string `json:"err,omitempty" msgpack:"err,omitempty"`
+	SeqNum   uint64 `json:"x,omitempty"`
+	Duration uint64 `json:"dur,omitempty"`
+	Error    string `json:"err,omitempty"`
 }

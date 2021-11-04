@@ -3,7 +3,6 @@ package uspclient
 import (
 	"bytes"
 	"compress/gzip"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -14,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/refractionPOINT/go-uspclient/protocol"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -114,7 +115,7 @@ func TestConnection(t *testing.T) {
 				fmt.Printf("gzip.NewReader(): %v\n", err)
 				return
 			}
-			j := json.NewDecoder(z)
+			j := msgpack.NewDecoder(z)
 
 			msg := protocol.DataMessage{}
 			if err := j.Decode(&msg); err != nil {
