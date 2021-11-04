@@ -47,6 +47,7 @@ type ClientOptions struct {
 	Architecture  string                     `json:"architecture,omitempty" yaml:"architecture,omitempty"`
 	Mapping       protocol.MappingDescriptor `json:"mapping,omitempty" yaml:"mapping,omitempty"`
 	BufferOptions AckBufferOptions           `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
+	IsCompressed  bool                       `json:"is_compressed,omitempty" yaml:"is_compressed,omitempty"`
 
 	SensorKeyPath string `json:"sensor_key_path" yaml:"sensor_key_path"`
 	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key"`
@@ -146,7 +147,7 @@ func (c *Client) connect() error {
 		Architecture:    c.options.Architecture,
 		Mapping:         c.options.Mapping,
 		SensorSeedKey:   c.options.SensorSeedKey,
-		IsCompressed:    true,
+		IsCompressed:    c.options.IsCompressed,
 		DataFormat:      "msgpack",
 	}); err != nil {
 		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))

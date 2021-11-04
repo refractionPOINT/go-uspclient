@@ -161,6 +161,7 @@ func TestConnection(t *testing.T) {
 			Oid:             testOID,
 			InstallationKey: testIID,
 		},
+		IsCompressed: true,
 		DestURL:      fmt.Sprintf("ws://127.0.0.1:%d/usp", testPort),
 		Hostname:     testHostname,
 		Platform:     testPlatform,
