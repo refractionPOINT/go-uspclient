@@ -1,5 +1,10 @@
 package protocol
 
+import (
+	"encoding/json"
+	"strconv"
+)
+
 // Whenever a value references a "Path", it means the value is a
 // string representing where to find a specific field recursively
 // in the JSON event, separated by "/".
@@ -42,4 +47,43 @@ type FieldMapping struct {
 	// Map the source field to the destination field.
 	SourceField      string `json:"src_field" yaml:"src_field"`
 	DestinationField string `json:"dst_field" yaml:"dst_field"`
+}
+
+// This custom JSON Unmarshaler permits the `IsRenameOnly` value to be
+// loaded either from a bool or a string (from an environment variable for example).
+type tempMappingDescriptor MappingDescriptor
+
+func (md *MappingDescriptor) UnmarshalJSON(data []byte) error {
+	// First get all the fields parsed in a dictionary.
+	d := map[string]interface{}{}
+	if err := json.Unmarshal(data, &d); err != nil {
+		return err
+	}
+
+	// Check if the `rename_only` field is present and if
+	// it is, is it a string?
+	var err error
+	if ro, ok := d["rename_only"]; ok {
+		if ros, ok := ro.(string); ok {
+			if d["rename_only"], err = strconv.ParseBool(ros); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Re-marshal to JSON so that we can
+	// do another single-pass Unmarshal.
+	t, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+
+	// Finally extract to a temporary type
+	// (to bypass this custom Unmarshaler).
+	tmd := tempMappingDescriptor{}
+	if err := json.Unmarshal(t, &tmd); err != nil {
+		return err
+	}
+	*md = MappingDescriptor(tmd)
+	return nil
 }
