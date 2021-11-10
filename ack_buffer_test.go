@@ -227,3 +227,40 @@ func TestAckBufferBoundaries(t *testing.T) {
 		t.Errorf("unexpected number of unacked events: %+v", out)
 	}
 }
+
+func TestAckAlways(t *testing.T) {
+	// Case 1: overflow ack between bounds
+	b, err := NewAckBuffer(AckBufferOptions{
+		BufferCapacity: 10,
+	})
+	if err != nil {
+		t.Errorf("failed creating ack buffer: %v", err)
+		return
+	}
+
+	seqNum := uint64(1)
+	for i := 0; i < 100; i++ {
+		if !b.Add(&protocol.DataMessage{}, 0) {
+			t.Error("failed to add")
+			return
+		}
+		if b.GetNextToDeliver(0) == nil {
+			t.Error("should have been able to get a delivery")
+			return
+		}
+		if err := b.Ack(seqNum); err != nil {
+			t.Errorf("failed acking: %v", err)
+			return
+		}
+		seqNum++
+	}
+
+	out, err := b.GetUnAcked()
+	if err != nil {
+		t.Errorf("failed getting unacked: %v", err)
+		return
+	}
+	if len(out) != 0 {
+		t.Errorf("unexpected number of unacked events: %d", len(out))
+	}
+}
