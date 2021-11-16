@@ -83,6 +83,14 @@ func TestConnection(t *testing.T) {
 		nConnections++
 		atomic.AddUint32(&nConnections, 1)
 
+		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if err := conn.WriteJSON(protocol.ControlMessage{
+			Verb: protocol.ControlMessageREADY,
+		}); err != nil {
+			fmt.Printf("WriteJSON(): %v\n", err)
+			return
+		}
+
 		m := sync.Mutex{}
 		if atomic.LoadUint32(&nConnections) == 1 {
 			// Only do a reconnect on the first connection.

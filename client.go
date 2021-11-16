@@ -157,6 +157,13 @@ func (c *Client) connect() error {
 		c.setLastError(err)
 		return err
 	}
+	// Wait for sink ready signal.
+	msg := protocol.ControlMessage{}
+	conn.SetReadDeadline(time.Now().Add(1 * time.Minute))
+	if err := conn.ReadJSON(&msg); err != nil {
+		c.setLastError(err)
+		return err
+	}
 	c.isStop.Clear()
 	c.conn = conn
 	c.wg.Add(1)
