@@ -5,6 +5,7 @@ const (
 	ControlMessageBACKOFF   = "bo"
 	ControlMessageRECONNECT = "re"
 	ControlMessageERROR     = "error"
+	ControlMessageREADY     = "rd"
 )
 
 type DataMessage struct {
