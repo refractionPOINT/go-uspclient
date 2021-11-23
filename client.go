@@ -166,6 +166,14 @@ func (c *Client) connect() error {
 		c.setLastError(err)
 		return err
 	}
+
+	// We expect a READY control message to tell us
+	// we're good to go. If not, abort.
+	if err := c.processControlMessage(msg); err != nil {
+		c.setLastError(err)
+		return err
+	}
+
 	c.isStop.Clear()
 	c.conn = conn
 	c.wg.Add(1)
@@ -256,31 +264,42 @@ func (c *Client) listener() {
 		msg := protocol.ControlMessage{}
 		c.conn.SetReadDeadline(time.Now().Add(60 * time.Minute))
 		if err := c.conn.ReadJSON(&msg); err != nil {
+			c.onWarning(err.Error())
 			c.setLastError(err)
 			go c.Reconnect()
 			return
 		}
 
-		switch msg.Verb {
-		case protocol.ControlMessageACK:
-			if err := c.ab.Ack(msg.SeqNum); err != nil {
-				c.setLastError(err)
-				c.log(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
-			}
-		case protocol.ControlMessageBACKOFF:
-			atomic.SwapUint64(&c.backoffTime, msg.Duration)
-		case protocol.ControlMessageRECONNECT:
-			go c.Reconnect()
-			return
-		case protocol.ControlMessageERROR:
-			c.onError(errors.New(msg.Error))
-		default:
-			// Ignoring unknown verbs.
-			err := fmt.Errorf("received unknown control message: %s", msg.Verb)
-			c.onWarning(err.Error())
-			c.setLastError(err)
-		}
+		c.processControlMessage(msg)
 	}
+}
+
+func (c *Client) processControlMessage(msg protocol.ControlMessage) error {
+	switch msg.Verb {
+	case protocol.ControlMessageACK:
+		if err := c.ab.Ack(msg.SeqNum); err != nil {
+			c.setLastError(err)
+			c.onWarning(fmt.Sprintf("error acking %d: %v", msg.SeqNum, err))
+		}
+	case protocol.ControlMessageBACKOFF:
+		atomic.SwapUint64(&c.backoffTime, msg.Duration)
+	case protocol.ControlMessageRECONNECT:
+		go c.Reconnect()
+		return errors.New("reconnect requested")
+	case protocol.ControlMessageERROR:
+		err := errors.New(msg.Error)
+		c.onError(err)
+		return err
+	case protocol.ControlMessageREADY:
+		return nil
+	default:
+		// Ignoring unknown verbs.
+		err := fmt.Errorf("received unknown control message: %s", msg.Verb)
+		c.onWarning(err.Error())
+		c.setLastError(err)
+		return err
+	}
+	return nil
 }
 
 func (c *Client) sender() {

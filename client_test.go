@@ -110,6 +110,15 @@ func TestConnection(t *testing.T) {
 			}()
 		}
 
+		time.Sleep(2 * time.Second)
+		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if err := conn.WriteJSON(protocol.ControlMessage{
+			Verb:  protocol.ControlMessageERROR,
+			Error: "some error",
+		}); err != nil {
+			t.Errorf("WriteJSON(): %v\n", err)
+		}
+
 		for {
 			conn.SetReadDeadline(time.Now().Add(20 * time.Second))
 			_, p, err := conn.ReadMessage()
@@ -149,6 +158,16 @@ func TestConnection(t *testing.T) {
 				return
 			}
 		}
+
+		time.Sleep(2 * time.Second)
+		conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+		if err := conn.WriteJSON(protocol.ControlMessage{
+			Verb:  protocol.ControlMessageERROR,
+			Error: "some error",
+		}); err != nil {
+			t.Errorf("WriteJSON(): %v\n", err)
+		}
+
 	})
 	srv := &http.Server{
 		Handler: h,
@@ -163,6 +182,8 @@ func TestConnection(t *testing.T) {
 		}
 	}()
 	time.Sleep(2 * time.Second)
+
+	isErrorReceived := false
 
 	c, err := NewClient(ClientOptions{
 		Identity: Identity{
@@ -179,6 +200,11 @@ func TestConnection(t *testing.T) {
 		},
 		BufferOptions: AckBufferOptions{
 			BufferCapacity: 10,
+		},
+		OnError: func(err error) {
+			if err.Error() == "some error" {
+				isErrorReceived = true
+			}
 		},
 	})
 	if err != nil {
@@ -205,6 +231,10 @@ func TestConnection(t *testing.T) {
 
 	if atomic.LoadUint32(&nConnections) != 2 {
 		t.Errorf("unexpected number of total connections: %d", atomic.LoadUint32(&nConnections))
+	}
+
+	if !isErrorReceived {
+		t.Error("expected to receive an error")
 	}
 
 	srv.Close()
