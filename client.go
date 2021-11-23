@@ -53,7 +53,9 @@ type ClientOptions struct {
 	SensorKeyPath string `json:"sensor_key_path" yaml:"sensor_key_path"`
 	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key"`
 
-	DebugLog func(string) `json:"-" yaml:"-"`
+	DebugLog  func(string) `json:"-" yaml:"-"`
+	OnError   func(error)  `json:"-" yaml:"-"`
+	OnWarning func(string) `json:"-" yaml:"-"`
 
 	// Auto-detect if not specified (preferred).
 	DestURL string `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
@@ -133,7 +135,7 @@ func (c *Client) connect() error {
 	// Connect the websocket.
 	conn, _, err := websocket.DefaultDialer.Dial(c.wssURL, nil)
 	if err != nil {
-		c.log(fmt.Sprintf("usp-client Dial(): %v", err))
+		c.onError(fmt.Errorf("Dial(): %v", err))
 		c.setLastError(err)
 		return err
 	}
@@ -151,7 +153,7 @@ func (c *Client) connect() error {
 		IsCompressed:    c.options.IsCompressed,
 		DataFormat:      "msgpack",
 	}); err != nil {
-		c.log(fmt.Sprintf("usp-client WriteJSON(): %v", err))
+		c.onWarning(fmt.Sprintf("WriteJSON(): %v", err))
 		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
 		conn.Close()
 		c.setLastError(err)
@@ -207,7 +209,7 @@ func (c *Client) Reconnect() (bool, error) {
 	}
 	if err := c.disconnect(); err != nil {
 		c.setLastError(err)
-		c.log(fmt.Sprintf("error disconnecting: %v", err))
+		c.onWarning(fmt.Sprintf("error disconnecting: %v", err))
 	}
 
 	// We assume that anything that was not ACKed should be resent
@@ -218,7 +220,7 @@ func (c *Client) Reconnect() (bool, error) {
 		err = c.connect()
 		if err != nil {
 			c.setLastError(err)
-			c.log(fmt.Sprintf("error reconnecting: %v", err))
+			c.onWarning(fmt.Sprintf("error reconnecting: %v", err))
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -271,11 +273,11 @@ func (c *Client) listener() {
 			go c.Reconnect()
 			return
 		case protocol.ControlMessageERROR:
-			c.log(fmt.Sprintf("receive error from LimaCharlie: %s", msg.Error))
+			c.onError(errors.New(msg.Error))
 		default:
 			// Ignoring unknown verbs.
 			err := fmt.Errorf("received unknown control message: %s", msg.Verb)
-			c.log(err.Error())
+			c.onWarning(err.Error())
 			c.setLastError(err)
 		}
 	}
@@ -309,11 +311,13 @@ func (c *Client) sender() {
 		}
 		m := msgpack.NewEncoder(w)
 		if err := m.Encode(message); err != nil {
+			c.onError(fmt.Errorf("msgpack.Encode(): %v", err))
 			c.setLastError(err)
 			continue
 		}
 		if z != nil {
 			if err := z.Close(); err != nil {
+				c.onError(fmt.Errorf("gzip.Close(): %v", err))
 				c.setLastError(err)
 				continue
 			}
@@ -359,4 +363,16 @@ func (c *Client) log(m string) {
 		return
 	}
 	c.options.DebugLog(m)
+}
+
+func (c *Client) onWarning(m string) {
+	if c.options.OnWarning != nil {
+		c.options.OnWarning(m)
+	}
+}
+
+func (c *Client) onError(err error) {
+	if c.options.OnError != nil {
+		c.options.OnError(err)
+	}
 }
