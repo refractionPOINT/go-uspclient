@@ -28,6 +28,7 @@ type Client struct {
 	ab             *AckBuffer
 	wg             sync.WaitGroup
 	connMutex      sync.Mutex
+	isStart        *Event
 	isStop         *Event
 	isReconnecting uint32
 	backoffTime    uint64
@@ -107,6 +108,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 		wssURL:  wssEndpoint,
 		ab:      ab,
 		isStop:  NewEvent(),
+		isStart: NewEvent(),
 	}
 	if err := c.connect(); err != nil {
 		return nil, err
@@ -131,6 +133,7 @@ func (c *Client) connect() error {
 	c.log("usp-client connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
+	c.isStart.Clear()
 
 	// Connect the websocket.
 	conn, _, err := websocket.DefaultDialer.Dial(c.wssURL, nil)
@@ -154,7 +157,7 @@ func (c *Client) connect() error {
 		DataFormat:      "msgpack",
 	}); err != nil {
 		c.onWarning(fmt.Sprintf("WriteJSON(): %v", err))
-		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
+		conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
 		conn.Close()
 		c.setLastError(err)
 		return err
@@ -175,6 +178,7 @@ func (c *Client) connect() error {
 	}
 
 	c.isStop.Clear()
+	defer c.isStart.Set()
 	c.conn = conn
 	c.wg.Add(1)
 	go func() {
@@ -203,6 +207,7 @@ func (c *Client) disconnect() error {
 	c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
 	err := c.conn.Close()
 	c.wg.Wait()
+	c.conn = nil
 	if err != nil {
 		c.setLastError(err)
 		return err
@@ -210,34 +215,34 @@ func (c *Client) disconnect() error {
 	return nil
 }
 
-func (c *Client) Reconnect() (bool, error) {
+func (c *Client) Reconnect() {
 	// Make sure only one thread is reconnecting
 	if !atomic.CompareAndSwapUint32(&c.isReconnecting, 0, 1) {
-		return false, nil
+		return
 	}
-	if err := c.disconnect(); err != nil {
-		c.setLastError(err)
-		c.onWarning(fmt.Sprintf("error disconnecting: %v", err))
-	}
-
-	// We assume that anything that was not ACKed should be resent
-	c.ab.ResetDelivery()
-
-	var err error
-	for {
-		err = c.connect()
-		if err != nil {
+	go func() {
+		if err := c.disconnect(); err != nil {
 			c.setLastError(err)
-			c.onWarning(fmt.Sprintf("error reconnecting: %v", err))
-			time.Sleep(5 * time.Second)
-			continue
+			c.onWarning(fmt.Sprintf("error disconnecting: %v", err))
 		}
-		break
-	}
 
-	atomic.StoreUint32(&c.isReconnecting, 0)
+		// We assume that anything that was not ACKed should be resent
+		c.ab.ResetDelivery()
 
-	return true, err
+		var err error
+		for {
+			err = c.connect()
+			if err != nil {
+				c.setLastError(err)
+				c.onWarning(fmt.Sprintf("error reconnecting: %v", err))
+				time.Sleep(5 * time.Second)
+				continue
+			}
+			break
+		}
+
+		atomic.StoreUint32(&c.isReconnecting, 0)
+	}()
 }
 
 func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) error {
@@ -260,13 +265,15 @@ func (c *Client) GetUnsent() ([]*protocol.DataMessage, error) {
 func (c *Client) listener() {
 	defer c.log("listener exited")
 
+	c.isStart.Wait()
+
 	for !c.isStop.IsSet() {
 		msg := protocol.ControlMessage{}
 		c.conn.SetReadDeadline(time.Now().Add(60 * time.Minute))
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			c.onWarning(err.Error())
 			c.setLastError(err)
-			go c.Reconnect()
+			c.Reconnect()
 			return
 		}
 
@@ -284,7 +291,7 @@ func (c *Client) processControlMessage(msg protocol.ControlMessage) error {
 	case protocol.ControlMessageBACKOFF:
 		atomic.SwapUint64(&c.backoffTime, msg.Duration)
 	case protocol.ControlMessageRECONNECT:
-		go c.Reconnect()
+		c.Reconnect()
 		return errors.New("reconnect requested")
 	case protocol.ControlMessageERROR:
 		err := errors.New(msg.Error)
@@ -304,6 +311,8 @@ func (c *Client) processControlMessage(msg protocol.ControlMessage) error {
 
 func (c *Client) sender() {
 	defer c.log("sender exited")
+
+	c.isStart.Wait()
 
 	for !c.isStop.IsSet() {
 		backoffSec := atomic.SwapUint64(&c.backoffTime, 0)
@@ -338,14 +347,16 @@ func (c *Client) sender() {
 			if err := z.Close(); err != nil {
 				c.onError(fmt.Errorf("gzip.Close(): %v", err))
 				c.setLastError(err)
+
 				continue
 			}
 		}
 
 		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
+			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
-			go c.Reconnect()
+			c.Reconnect()
 			return
 		}
 	}
@@ -354,14 +365,17 @@ func (c *Client) sender() {
 func (c *Client) keepAliveSender() {
 	defer c.log("keepalive exited")
 
+	c.isStart.Wait()
+
 	for {
 		if c.isStop.WaitFor(30 * time.Second) {
 			return
 		}
 
 		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+			c.onWarning(fmt.Sprintf("keepalive failed, reconnecting: %v", err))
 			c.setLastError(err)
-			go c.Reconnect()
+			c.Reconnect()
 			return
 		}
 	}
