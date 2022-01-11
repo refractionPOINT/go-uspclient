@@ -204,8 +204,11 @@ func (c *Client) disconnect() error {
 	c.isStop.Set()
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
-	c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
-	err := c.conn.Close()
+	var err error
+	if c.conn != nil {
+		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
+		err = c.conn.Close()
+	}
 	c.wg.Wait()
 	c.conn = nil
 	if err != nil {
@@ -352,7 +355,7 @@ func (c *Client) sender() {
 			}
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		c.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
