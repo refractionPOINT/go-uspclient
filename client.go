@@ -352,7 +352,7 @@ func (c *Client) sender() {
 			}
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		c.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
