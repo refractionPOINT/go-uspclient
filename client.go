@@ -272,7 +272,7 @@ func (c *Client) listener() {
 
 	for !c.isStop.IsSet() {
 		msg := protocol.ControlMessage{}
-		c.conn.SetReadDeadline(time.Now().Add(60 * time.Minute))
+		c.conn.SetReadDeadline(time.Now().Add(24*time.Hour))
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			c.onWarning(err.Error())
 			c.setLastError(err)
