@@ -375,7 +375,7 @@ func (c *Client) keepAliveSender() {
 			return
 		}
 
-		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(45*time.Second)); err != nil {
 			c.onWarning(fmt.Sprintf("keepalive failed, reconnecting: %v", err))
 			c.setLastError(err)
 			c.Reconnect()
