@@ -272,7 +272,7 @@ func (c *Client) listener() {
 
 	for !c.isStop.IsSet() {
 		msg := protocol.ControlMessage{}
-		c.conn.SetReadDeadline(time.Now().Add(24*time.Hour))
+		c.conn.SetReadDeadline(time.Now().Add(24 * time.Hour))
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			c.onWarning(err.Error())
 			c.setLastError(err)
@@ -318,8 +318,11 @@ func (c *Client) sender() {
 	c.isStart.Wait()
 
 	for !c.isStop.IsSet() {
-		backoffSec := atomic.SwapUint64(&c.backoffTime, 0)
-		if backoffSec != 0 {
+		for {
+			backoffSec := atomic.SwapUint64(&c.backoffTime, 0)
+			if backoffSec == 0 {
+				break
+			}
 			c.log(fmt.Sprintf("backing off %d seconds", backoffSec))
 			time.Sleep(time.Duration(backoffSec) * time.Second)
 		}
@@ -375,7 +378,7 @@ func (c *Client) keepAliveSender() {
 			return
 		}
 
-		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(2 * time.Minute)); err != nil {
+		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(2*time.Minute)); err != nil {
 			c.onWarning(fmt.Sprintf("keepalive failed, reconnecting: %v", err))
 			c.setLastError(err)
 			c.Reconnect()
