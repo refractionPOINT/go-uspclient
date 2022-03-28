@@ -317,6 +317,10 @@ func (c *Client) sender() {
 
 	c.isStart.Wait()
 
+	if um, err := c.ab.GetUnAcked(); err == nil && len(um) != 0 {
+		c.log(fmt.Sprintf("re-transmitting %d previously unacked messages", len(um)))
+	}
+
 	for !c.isStop.IsSet() {
 		for {
 			backoffSec := atomic.SwapUint64(&c.backoffTime, 0)
@@ -358,7 +362,7 @@ func (c *Client) sender() {
 			}
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		c.conn.SetWriteDeadline(time.Now().Add(1 * time.Minute))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
