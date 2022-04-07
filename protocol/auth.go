@@ -1,7 +1,7 @@
 package protocol
 
 const (
-	CurrentVersion = 1
+	CurrentVersion = 2
 )
 
 type ConnectionHeader struct {

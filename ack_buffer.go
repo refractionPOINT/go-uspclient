@@ -10,12 +10,11 @@ import (
 )
 
 const (
-	defaultCapacity      = 5000
+	initialCapacity      = 1
 	ackPercentOfCapacity = 0.5
 )
 
 type AckBufferOptions struct {
-	BufferCapacity uint64 `json:"buffer_capacity" yaml:"buffer_capacity"`
 	OnBackPressure func() `json:"-" yaml:"-"`
 	OnAck          func() `json:"-" yaml:"-"`
 }
@@ -35,22 +34,22 @@ type AckBuffer struct {
 	nextIndexToDeliver uint64
 	isReadyToDeliver   *Event
 
+	currentCapacity uint64
+
 	onBackPressure func()
 	onAck          func()
 }
 
 func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
-	if o.BufferCapacity == 0 {
-		o.BufferCapacity = defaultCapacity
-	}
 	b := &AckBuffer{
-		buff:             make([]*protocol.DataMessage, o.BufferCapacity),
-		ackEvery:         uint64(float64(o.BufferCapacity) * ackPercentOfCapacity),
+		buff:             make([]*protocol.DataMessage, initialCapacity),
+		ackEvery:         initialCapacity,
 		isRunning:        true,
 		isAvailable:      NewEvent(),
 		firstSeqNum:      1,
 		nextSeqNum:       1,
 		isReadyToDeliver: NewEvent(),
+		currentCapacity:  initialCapacity,
 		onBackPressure:   o.OnBackPressure,
 		onAck:            o.OnAck,
 	}
@@ -104,7 +103,7 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 		}
 		b.buff[b.nextIndexFree] = e
 		b.nextIndexFree++
-		if b.nextIndexFree >= uint64(len(b.buff)) {
+		if b.nextIndexFree >= b.currentCapacity {
 			b.isAvailable.Clear()
 		}
 		hasBeenAdded = true
@@ -185,4 +184,37 @@ func (b *AckBuffer) ResetDelivery() {
 	} else {
 		b.isReadyToDeliver.Set()
 	}
+}
+
+func (b *AckBuffer) GetCurrentCapacity() uint64 {
+	b.Lock()
+	defer b.Unlock()
+	return b.currentCapacity
+}
+
+func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
+	b.Lock()
+	defer b.Unlock()
+
+	if newCapacity == b.currentCapacity {
+		return
+	}
+
+	// We only ever grow the capacity.
+	if uint64(len(b.buff)) < newCapacity {
+		newBuff := make([]*protocol.DataMessage, newCapacity)
+		copy(newBuff, b.buff)
+		b.buff = newBuff
+		b.isAvailable.Set()
+	} else if b.currentCapacity < newCapacity {
+		if b.nextIndexFree == b.currentCapacity {
+			b.isAvailable.Set()
+		}
+	} else if b.currentCapacity > newCapacity {
+		if b.nextIndexFree >= newCapacity {
+			b.isAvailable.Clear()
+		}
+	}
+	b.currentCapacity = newCapacity
+	b.ackEvery = uint64(float64(newCapacity) * ackPercentOfCapacity)
 }

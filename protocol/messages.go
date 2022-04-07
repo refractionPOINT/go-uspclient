@@ -6,6 +6,7 @@ const (
 	ControlMessageRECONNECT = "re"
 	ControlMessageERROR     = "error"
 	ControlMessageREADY     = "rd"
+	ControlMessageFLOW      = "fl"
 )
 
 type DataMessage struct {
@@ -34,7 +35,8 @@ type ControlMessage struct {
 	Verb string `json:"v"`
 
 	// Optional components depending on verb.
-	SeqNum   uint64 `json:"x,omitempty"`
-	Duration uint64 `json:"dur,omitempty"`
-	Error    string `json:"err,omitempty"`
+	SeqNum     uint64 `json:"x,omitempty"`
+	Duration   uint64 `json:"dur,omitempty"`
+	WindowSize uint64 `json:"win,omitempty"`
+	Error      string `json:"err,omitempty"`
 }
