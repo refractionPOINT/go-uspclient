@@ -186,6 +186,12 @@ func (b *AckBuffer) ResetDelivery() {
 	}
 }
 
+func (b *AckBuffer) GetCurrentCapacity() uint64 {
+	b.Lock()
+	defer b.Unlock()
+	return b.currentCapacity
+}
+
 func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
 	b.Lock()
 	defer b.Unlock()

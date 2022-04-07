@@ -224,7 +224,33 @@ func TestConnection(t *testing.T) {
 		}
 	}
 
-	time.Sleep(10 * time.Second)
+	time.Sleep(2 * time.Second)
+
+	c.ab.UpdateCapacity(5)
+	for i := 0; i < 30; i++ {
+		if err := c.Ship(&protocol.DataMessage{
+			JsonPayload: map[string]interface{}{
+				"some": "payload",
+			},
+		}, 1*time.Second); err != nil {
+			t.Errorf("Ship(): %v", err)
+			break
+		}
+	}
+
+	time.Sleep(2 * time.Second)
+
+	c.ab.UpdateCapacity(100)
+	for i := 0; i < 30; i++ {
+		if err := c.Ship(&protocol.DataMessage{
+			JsonPayload: map[string]interface{}{
+				"some": "payload",
+			},
+		}, 1*time.Second); err != nil {
+			t.Errorf("Ship(): %v", err)
+			break
+		}
+	}
 
 	c.Close()
 

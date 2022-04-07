@@ -302,6 +302,9 @@ func (c *Client) processControlMessage(msg protocol.ControlMessage) error {
 		return err
 	case protocol.ControlMessageREADY:
 		return nil
+	case protocol.ControlMessageFLOW:
+		c.log(fmt.Sprintf("flow control adjusted: %d -> %d", c.ab.GetCurrentCapacity(), msg.WindowSize))
+		c.ab.UpdateCapacity(msg.WindowSize)
 	default:
 		// Ignoring unknown verbs.
 		err := fmt.Errorf("received unknown control message: %s", msg.Verb)

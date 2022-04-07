@@ -314,6 +314,17 @@ func TestAckBufferScaleUpDown(t *testing.T) {
 		t.Error("should be ready to deliver")
 	}
 
+	if b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected add")
+	}
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
 	if b.GetNextToDeliver(0) == nil {
 		t.Error("should have a message to deliver")
 	}
