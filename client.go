@@ -362,7 +362,7 @@ func (c *Client) sender() {
 			}
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(1 * time.Minute))
+		c.conn.SetWriteDeadline(time.Now().Add(30 * time.Minute))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
@@ -382,7 +382,7 @@ func (c *Client) keepAliveSender() {
 			return
 		}
 
-		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(2*time.Minute)); err != nil {
+		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(30*time.Minute)); err != nil {
 			c.onWarning(fmt.Sprintf("keepalive failed, reconnecting: %v", err))
 			c.setLastError(err)
 			c.Reconnect()
