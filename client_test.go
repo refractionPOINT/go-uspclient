@@ -198,15 +198,14 @@ func TestConnection(t *testing.T) {
 		DebugLog: func(s string) {
 			fmt.Println(s)
 		},
-		BufferOptions: AckBufferOptions{
-			BufferCapacity: 10,
-		},
+		BufferOptions: AckBufferOptions{},
 		OnError: func(err error) {
 			if err.Error() == "some error" {
 				isErrorReceived = true
 			}
 		},
 	})
+	c.ab.UpdateCapacity(10)
 	if err != nil {
 		t.Errorf("NewClient(): %v", err)
 		return

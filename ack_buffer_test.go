@@ -9,9 +9,8 @@ import (
 )
 
 func TestAckBufferBasics(t *testing.T) {
-	b, err := NewAckBuffer(AckBufferOptions{
-		BufferCapacity: 5,
-	})
+	b, err := NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(5)
 	if err != nil {
 		t.Errorf("failed creating ack buffer: %v", err)
 		return
@@ -89,9 +88,8 @@ func TestAckBufferBasics(t *testing.T) {
 }
 
 func TestAckBufferWaits(t *testing.T) {
-	b, err := NewAckBuffer(AckBufferOptions{
-		BufferCapacity: 3,
-	})
+	b, err := NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(5)
 	if err != nil {
 		t.Errorf("failed creating ack buffer: %v", err)
 		return
@@ -129,9 +127,8 @@ func TestAckBufferWaits(t *testing.T) {
 
 func TestAckBufferBoundaries(t *testing.T) {
 	// Case 1: overflow ack between bounds
-	b, err := NewAckBuffer(AckBufferOptions{
-		BufferCapacity: 10,
-	})
+	b, err := NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(10)
 	if err != nil {
 		t.Errorf("failed creating ack buffer: %v", err)
 		return
@@ -164,9 +161,8 @@ func TestAckBufferBoundaries(t *testing.T) {
 	}
 
 	// Case 2: overflow ack on exact bounds
-	b, err = NewAckBuffer(AckBufferOptions{
-		BufferCapacity: 10,
-	})
+	b, err = NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(10)
 	if err != nil {
 		t.Errorf("failed creating ack buffer: %v", err)
 		return
@@ -199,9 +195,8 @@ func TestAckBufferBoundaries(t *testing.T) {
 	}
 
 	// Case 3: overflow ack out of bounds
-	b, err = NewAckBuffer(AckBufferOptions{
-		BufferCapacity: 10,
-	})
+	b, err = NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(10)
 	if err != nil {
 		t.Errorf("failed creating ack buffer: %v", err)
 		return
@@ -230,9 +225,8 @@ func TestAckBufferBoundaries(t *testing.T) {
 
 func TestAckAlways(t *testing.T) {
 	// Case 1: overflow ack between bounds
-	b, err := NewAckBuffer(AckBufferOptions{
-		BufferCapacity: 10,
-	})
+	b, err := NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(10)
 	if err != nil {
 		t.Errorf("failed creating ack buffer: %v", err)
 		return
@@ -262,5 +256,122 @@ func TestAckAlways(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Errorf("unexpected number of unacked events: %d", len(out))
+	}
+}
+
+func TestAckBufferScaleUpDown(t *testing.T) {
+	b, _ := NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(5)
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+
+	b.UpdateCapacity(7)
+
+	if !b.isAvailable.IsSet() {
+		t.Error("should still be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+
+	if b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected add")
+	}
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	b.UpdateCapacity(4)
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have a message to deliver")
+	}
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have a message to deliver")
+	}
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have a message to deliver")
+	}
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have a message to deliver")
+	}
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	if err := b.Ack(4); err != nil {
+		t.Errorf("failed acking: %v", err)
+	}
+
+	if !b.isAvailable.IsSet() {
+		t.Error("should still be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have a message to deliver")
+	}
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have a message to deliver")
+	}
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have a message to deliver")
+	}
+
+	if b.GetNextToDeliver(0) != nil {
+		t.Error("should not have a message to deliver")
 	}
 }
