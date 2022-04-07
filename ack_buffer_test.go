@@ -386,3 +386,44 @@ func TestAckBufferScaleUpDown(t *testing.T) {
 		t.Error("should not have a message to deliver")
 	}
 }
+
+func TestAckBufferInitialAck(t *testing.T) {
+	b, _ := NewAckBuffer(AckBufferOptions{})
+	if !b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected failed add")
+	}
+	if b.Add(&protocol.DataMessage{}, 1*time.Second) {
+		t.Error("unexpected add")
+	}
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if !b.isReadyToDeliver.IsSet() {
+		t.Error("should be ready to deliver")
+	}
+
+	if msg := b.GetNextToDeliver(0); msg == nil {
+		t.Error("should have a message to deliver")
+	} else if !msg.AckRequested {
+		t.Errorf("missing ack request: %+v", msg)
+	}
+
+	if b.isAvailable.IsSet() {
+		t.Error("should not be available space in buffer")
+	}
+	if b.isReadyToDeliver.IsSet() {
+		t.Error("should not be ready to deliver")
+	}
+
+	if err := b.Ack(1); err != nil {
+		t.Errorf("failed acking: %v", err)
+	}
+
+	if !b.isAvailable.IsSet() {
+		t.Error("should still be available space in buffer")
+	}
+	if b.isReadyToDeliver.IsSet() {
+		t.Error("should not be ready to deliver")
+	}
+}
