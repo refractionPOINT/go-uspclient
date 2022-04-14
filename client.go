@@ -223,6 +223,7 @@ func (c *Client) Reconnect() {
 	if !atomic.CompareAndSwapUint32(&c.isReconnecting, 0, 1) {
 		return
 	}
+	c.ab.UpdateCapacity(1)
 	go func() {
 		if err := c.disconnect(); err != nil {
 			c.setLastError(err)

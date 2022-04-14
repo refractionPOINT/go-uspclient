@@ -65,6 +65,9 @@ The server may then send control messages to the client.
 
 The `Verb` element of a ControlMessage indicates the type of feedback and content that can be expected in the rest of the message.
 
+#### Flow Control
+Starting with version 2 and up, USP supports a TCP-like flow control concept. The new `ControlMessage` verb of `ControlMessageFLOW` (`fl`) with a component `WindowSize` (`win`) which is an indicator from the LimaCharlie backend that a larger Window Size (max number of unacknowledged messages in transit) should be set in the client. This is a way for the LimaCharlie backend to bring up to speed a given client in a controlled way (without flooding the LimaCharlie backend and requiring aggressive backoff). In version 2, the client should begin execution with a max window size of 1 and wait for feedback from LimaCharlie for when to increase it and by how much to increase it.
+
 ### Acknowledging DataMessage
 
 DataMessage is expected to contain a Sequence Number monotonically increasing. A ControlMessage with a `Verb` value of `ControlMessageACK` is used by the server to indicate all DataMessages with a Sequence Number equal or lower has been received and processed.
