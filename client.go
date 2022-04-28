@@ -17,6 +17,8 @@ import (
 	"github.com/refractionPOINT/go-uspclient/protocol"
 
 	"github.com/vmihailenco/msgpack/v5"
+
+	"github.com/google/uuid"
 )
 
 type Client struct {
@@ -35,6 +37,8 @@ type Client struct {
 
 	lastError  error
 	errorMutex sync.Mutex
+
+	instanceID string
 }
 
 type Identity struct {
@@ -110,6 +114,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 		isStop:  NewEvent(),
 		isStart: NewEvent(),
 	}
+	c.instanceID = uuid.NewString()
 	if err := c.connect(); err != nil {
 		return nil, err
 	}
@@ -155,6 +160,7 @@ func (c *Client) connect() error {
 		SensorSeedKey:   c.options.SensorSeedKey,
 		IsCompressed:    c.options.IsCompressed,
 		DataFormat:      "msgpack",
+		InstanceID:      c.instanceID,
 	}); err != nil {
 		c.onWarning(fmt.Sprintf("WriteJSON(): %v", err))
 		conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
