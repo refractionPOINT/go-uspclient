@@ -217,4 +217,7 @@ func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
 	}
 	b.currentCapacity = newCapacity
 	b.ackEvery = uint64(float64(newCapacity) * ackPercentOfCapacity)
+	if b.ackEvery == 0 {
+		b.ackEvery = 1
+	}
 }
