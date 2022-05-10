@@ -39,6 +39,8 @@ type Client struct {
 	errorMutex sync.Mutex
 
 	instanceID string
+
+	isClosing bool
 }
 
 type Identity struct {
@@ -124,6 +126,7 @@ func NewClient(o ClientOptions) (*Client, error) {
 
 func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	c.log("usp-client closing")
+	c.isClosing = true
 	err1 := c.disconnect()
 	messages, err2 := c.ab.GetUnAcked()
 	err := err1
@@ -225,6 +228,11 @@ func (c *Client) disconnect() error {
 }
 
 func (c *Client) Reconnect() {
+	if c.isClosing {
+		// If we're actually closing ignore
+		// requests for reconnecting.
+		return
+	}
 	// Make sure only one thread is reconnecting
 	if !atomic.CompareAndSwapUint32(&c.isReconnecting, 0, 1) {
 		return
