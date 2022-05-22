@@ -124,9 +124,19 @@ func NewClient(o ClientOptions) (*Client, error) {
 	return c, nil
 }
 
+func (c *Client) Drain(timeout time.Duration) error {
+	c.log("usp-client draining")
+	c.ab.Close()
+	if !c.ab.GetEmptyEvent().WaitFor(timeout) {
+		return errors.New("timeout draining")
+	}
+	return nil
+}
+
 func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	c.log("usp-client closing")
 	c.isClosing = true
+	c.ab.Close()
 	err1 := c.disconnect()
 	messages, err2 := c.ab.GetUnAcked()
 	err := err1

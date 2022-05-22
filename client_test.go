@@ -252,7 +252,12 @@ func TestConnection(t *testing.T) {
 		}
 	}
 
-	c.Close()
+	if err := c.Drain(10 * time.Minute); err != nil {
+		t.Errorf("error draining client: %v", err)
+	}
+	if _, err := c.Close(); err != nil {
+		t.Errorf("error closing client: %v", err)
+	}
 
 	if atomic.LoadUint32(&nConnections) != 2 {
 		t.Errorf("unexpected number of total connections: %d", atomic.LoadUint32(&nConnections))
