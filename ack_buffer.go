@@ -33,6 +33,7 @@ type AckBuffer struct {
 
 	nextIndexToDeliver uint64
 	isReadyToDeliver   *Event
+	isEmpty            *Event
 
 	currentCapacity uint64
 
@@ -49,13 +50,19 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 		firstSeqNum:      1,
 		nextSeqNum:       1,
 		isReadyToDeliver: NewEvent(),
+		isEmpty:          NewEvent(),
 		currentCapacity:  initialCapacity,
 		onBackPressure:   o.OnBackPressure,
 		onAck:            o.OnAck,
 	}
 	b.isAvailable.Set()
+	b.isEmpty.Set()
 
 	return b, nil
+}
+
+func (b *AckBuffer) GetEmptyEvent() *Event {
+	return b.isEmpty
 }
 
 func (b *AckBuffer) Close() {
@@ -108,6 +115,7 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 		}
 		hasBeenAdded = true
 		b.isReadyToDeliver.Set()
+		b.isEmpty.Clear()
 		b.Unlock()
 	}
 
@@ -146,6 +154,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	b.nextIndexToDeliver -= (indexAcked + 1)
 	if b.nextIndexToDeliver >= b.nextIndexFree {
 		b.isReadyToDeliver.Clear()
+		b.isEmpty.Set()
 	}
 	return nil
 }
@@ -171,6 +180,7 @@ func (b *AckBuffer) GetNextToDeliver(timeout time.Duration) *protocol.DataMessag
 	b.nextIndexToDeliver++
 	if b.nextIndexToDeliver >= b.nextIndexFree {
 		b.isReadyToDeliver.Clear()
+		b.isEmpty.Set()
 	}
 	return n
 }
@@ -181,8 +191,10 @@ func (b *AckBuffer) ResetDelivery() {
 	b.nextIndexToDeliver = 0
 	if b.nextIndexToDeliver >= b.nextIndexFree {
 		b.isReadyToDeliver.Clear()
+		b.isEmpty.Set()
 	} else {
 		b.isReadyToDeliver.Set()
+		b.isEmpty.Clear()
 	}
 }
 
