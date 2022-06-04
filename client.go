@@ -57,7 +57,6 @@ type ClientOptions struct {
 	BufferOptions AckBufferOptions           `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
 	IsCompressed  bool                       `json:"is_compressed,omitempty" yaml:"is_compressed,omitempty"`
 
-	SensorKeyPath string `json:"sensor_key_path" yaml:"sensor_key_path"`
 	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key"`
 
 	DebugLog  func(string) `json:"-" yaml:"-"`
