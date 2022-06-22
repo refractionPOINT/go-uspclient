@@ -67,6 +67,19 @@ type ClientOptions struct {
 	DestURL string `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
 }
 
+func (o ClientOptions) Validate() error {
+	if o.Identity.Oid == "" {
+		return errors.New("missing oid")
+	}
+	if o.Identity.InstallationKey == "" {
+		return errors.New("missing installation_key")
+	}
+	if o.Platform == "" {
+		return errors.New("missing platform")
+	}
+	return nil
+}
+
 var ErrorBufferFull = errors.New("buffer full")
 
 func NewClient(o ClientOptions) (*Client, error) {
