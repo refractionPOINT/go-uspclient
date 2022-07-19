@@ -137,7 +137,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	indexAcked := seq - b.firstSeqNum
 	if indexAcked >= b.nextIndexToDeliver {
 		nextSeq := uint64(0)
-		if b.buff[b.nextIndexToDeliver] != nil {
+		if b.nextIndexToDeliver < uint64(len(b.buff)) && b.buff[b.nextIndexToDeliver] != nil {
 			nextSeq = b.buff[b.nextIndexToDeliver].SeqNum
 		}
 		return fmt.Errorf("acked message (seq: %d) has not yet been delivered (next: %d)", seq, nextSeq)
