@@ -221,6 +221,38 @@ func TestAckBufferBoundaries(t *testing.T) {
 	if len(out) != 10 {
 		t.Errorf("unexpected number of unacked events: %+v", out)
 	}
+
+	// Case 4: ack overflow
+	b, err = NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(3)
+	if err != nil {
+		t.Errorf("failed creating ack buffer: %v", err)
+		return
+	}
+
+	if !b.Add(&protocol.DataMessage{}, 0) {
+		t.Error("failed to add")
+	}
+	if !b.Add(&protocol.DataMessage{}, 0) {
+		t.Error("failed to add")
+	}
+	if !b.Add(&protocol.DataMessage{}, 0) {
+		t.Error("failed to add")
+	}
+
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have been able to get a delivery")
+	}
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have been able to get a delivery")
+	}
+	if b.GetNextToDeliver(0) == nil {
+		t.Error("should have been able to get a delivery")
+	}
+
+	if err := b.Ack(4); err == nil {
+		t.Errorf("invalid ack should have generated an error")
+	}
 }
 
 func TestAckAlways(t *testing.T) {
