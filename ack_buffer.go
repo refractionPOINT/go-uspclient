@@ -97,10 +97,13 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 		if !b.isAvailable.IsSet() {
 			isRunning := b.isRunning
 			b.Unlock()
-			if deadline.IsZero() && isRunning {
-				continue
+			if !isRunning {
+				break
 			}
-			break
+			if !deadline.IsZero() && time.Now().After(deadline) {
+				break
+			}
+			continue
 		}
 
 		e.SeqNum = b.nextSeqNum
