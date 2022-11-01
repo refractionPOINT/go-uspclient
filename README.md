@@ -16,6 +16,9 @@ Upon connecting, the client will issue a connection handshake to the server cont
 * `Architecture`: name of the Architecture sensors this client will create.
 * `Mapping`: metadata indicating how to map fields coming from this client into JSON in LimaCharlie (see below).
 * `SensorSeedKey`: an arbitrary string used in generating the sensor IDs this client will create (see below).
+* `IsCompressed`: whether the cloud can expect the content shipped to it is compressed.
+* `DataFormat`: the rest of the connection can support `msgpack` or `json`.
+* `InstanceID`: an identifier unique to the instance of the adapter, used an indication the state of the adapter was reset.
 
 [Mapping Metadata](https://github.com/refractionPOINT/go-uspclient/blob/master/protocol/mapping.go)
 * `ParsingRE`: regular expression with [named capture groups](https://github.com/StefanSchroeder/Golang-Regex-Tutorial/blob/master/01-chapter2.markdown#named-matches). The name of each group will be used as the key in the converted JSON parsing.
@@ -44,6 +47,13 @@ For example, the `EventTypePath` equal to `metadata/original/action` applied to 
     }
 }
 ```
+
+[Indexing Metadata](https://github.com/refractionPOINT/go-uspclient/blob/master/protocol/indexing.go)
+* `EventsIncluded`: an optional inclusion list of event types this index applies to.
+* `EventsExcluded`: an optional exclusion list of event types this index does not apply to.
+* `Path`: the path within the event who's value is to be indexed.
+* `Regexp`: the regular expression, with a single capture group, to extract the value to index from the Path.
+* `IndexType`: the type of index this should apply to.
 
 #### Authorization
 Clients are authorized to connect based on the Organization ID (OID) and Installation Key ID (IID). Deleting the IID will prevent the client from connecting with it.
