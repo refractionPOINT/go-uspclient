@@ -54,6 +54,7 @@ type ClientOptions struct {
 	Platform      string                     `json:"platform,omitempty" yaml:"platform,omitempty"`
 	Architecture  string                     `json:"architecture,omitempty" yaml:"architecture,omitempty"`
 	Mapping       protocol.MappingDescriptor `json:"mapping,omitempty" yaml:"mapping,omitempty"`
+	Indexing      []protocol.IndexDescriptor `json:"indexing,omitempty" yaml:"indexing,omitempty"`
 	BufferOptions AckBufferOptions           `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
 	IsCompressed  bool                       `json:"is_compressed,omitempty" yaml:"is_compressed,omitempty"`
 
@@ -77,6 +78,16 @@ func (o ClientOptions) Validate() error {
 	if o.Platform == "" {
 		return errors.New("missing platform")
 	}
+
+	for i, desc := range o.Indexing {
+		if err := desc.Validate(); err != nil {
+			return fmt.Errorf("index descriptor %d invalid: %v", i, err)
+		}
+	}
+	if err := o.Mapping.Validate(); err != nil {
+		return fmt.Errorf("mapping descriptor invalid: %v", err)
+	}
+
 	return nil
 }
 
