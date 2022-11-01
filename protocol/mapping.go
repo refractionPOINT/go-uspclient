@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"regexp"
 	"strconv"
 )
 
@@ -85,5 +86,14 @@ func (md *MappingDescriptor) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*md = MappingDescriptor(tmd)
+	return nil
+}
+
+func (d MappingDescriptor) Validate() error {
+	if d.ParsingRE != "" {
+		if _, err := regexp.Compile(d.ParsingRE); err != nil {
+			return err
+		}
+	}
 	return nil
 }

@@ -1,5 +1,7 @@
 package protocol
 
+import "regexp"
+
 // Indexing descriptors are applied in the LimaCharlie cloud
 // once all mapping and parsing operations have been applied.
 type IndexDescriptor struct {
@@ -23,4 +25,13 @@ type IndexDescriptor struct {
 	// will result in an error.
 	// Like: user
 	IndexType string `json:"index_type"`
+}
+
+func (d IndexDescriptor) Validate() error {
+	if d.Regexp != "" {
+		if _, err := regexp.Compile(d.Regexp); err != nil {
+			return err
+		}
+	}
+	return nil
 }
