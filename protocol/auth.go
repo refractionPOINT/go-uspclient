@@ -16,4 +16,5 @@ type ConnectionHeader struct {
 	IsCompressed    bool              `json:"is_compressed"`
 	DataFormat      string            `json:"data_format"` // LimaCharlie supports "msgpack" or "json"
 	InstanceID      string            `json:"instance_id"`
+	Indexing        []IndexDescriptor `json:"indexing,omitempty"`
 }
