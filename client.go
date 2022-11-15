@@ -193,6 +193,7 @@ func (c *Client) connect() error {
 		Platform:        c.options.Platform,
 		Architecture:    c.options.Architecture,
 		Mapping:         c.options.Mapping,
+		Indexing:        c.options.Indexing,
 		SensorSeedKey:   c.options.SensorSeedKey,
 		IsCompressed:    c.options.IsCompressed,
 		DataFormat:      "msgpack",
