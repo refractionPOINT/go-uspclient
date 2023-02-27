@@ -49,14 +49,15 @@ type Identity struct {
 }
 
 type ClientOptions struct {
-	Identity      Identity                   `json:"identity" yaml:"identity"`
-	Hostname      string                     `json:"hostname,omitempty" yaml:"hostname,omitempty"`
-	Platform      string                     `json:"platform,omitempty" yaml:"platform,omitempty"`
-	Architecture  string                     `json:"architecture,omitempty" yaml:"architecture,omitempty"`
-	Mapping       protocol.MappingDescriptor `json:"mapping,omitempty" yaml:"mapping,omitempty"`
-	Indexing      []protocol.IndexDescriptor `json:"indexing,omitempty" yaml:"indexing,omitempty"`
-	BufferOptions AckBufferOptions           `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
-	IsCompressed  bool                       `json:"is_compressed,omitempty" yaml:"is_compressed,omitempty"`
+	Identity      Identity                     `json:"identity" yaml:"identity"`
+	Hostname      string                       `json:"hostname,omitempty" yaml:"hostname,omitempty"`
+	Platform      string                       `json:"platform,omitempty" yaml:"platform,omitempty"`
+	Architecture  string                       `json:"architecture,omitempty" yaml:"architecture,omitempty"`
+	Mapping       protocol.MappingDescriptor   `json:"mapping,omitempty" yaml:"mapping,omitempty"`
+	Mappings      []protocol.MappingDescriptor `json:"mappings,omitempty" yaml:"mappings,omitempty"`
+	Indexing      []protocol.IndexDescriptor   `json:"indexing,omitempty" yaml:"indexing,omitempty"`
+	BufferOptions AckBufferOptions             `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
+	IsCompressed  bool                         `json:"is_compressed,omitempty" yaml:"is_compressed,omitempty"`
 
 	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key"`
 
@@ -84,8 +85,16 @@ func (o ClientOptions) Validate() error {
 			return fmt.Errorf("index descriptor %d invalid: %v", i, err)
 		}
 	}
-	if err := o.Mapping.Validate(); err != nil {
-		return fmt.Errorf("mapping descriptor invalid: %v", err)
+	if len(o.Mappings) != 0 {
+		for i, m := range o.Mappings {
+			if err := m.Validate(); err != nil {
+				return fmt.Errorf("mapping descriptor %d invalid: %v", i, err)
+			}
+		}
+	} else {
+		if err := o.Mapping.Validate(); err != nil {
+			return fmt.Errorf("mapping descriptor invalid: %v", err)
+		}
 	}
 
 	return nil
@@ -121,6 +130,14 @@ func NewClient(o ClientOptions) (*Client, error) {
 		o.Hostname, _ = os.Hostname()
 	}
 
+	for i, m := range o.Mappings {
+		if m.ParsingRE == "" {
+			return nil, fmt.Errorf("mappings[%d].parsing_re not set, required for multiple mappings", i)
+		}
+		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {
+			return nil, fmt.Errorf("invalid mappings[%d].parsing_re: %v", i, err)
+		}
+	}
 	if o.Mapping.ParsingRE != "" {
 		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {
 			return nil, fmt.Errorf("invalid mapping.parsing_re: %v", err)
@@ -193,6 +210,7 @@ func (c *Client) connect() error {
 		Platform:        c.options.Platform,
 		Architecture:    c.options.Architecture,
 		Mapping:         c.options.Mapping,
+		Mappings:        c.options.Mappings,
 		Indexing:        c.options.Indexing,
 		SensorSeedKey:   c.options.SensorSeedKey,
 		IsCompressed:    c.options.IsCompressed,
