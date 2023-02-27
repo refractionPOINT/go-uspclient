@@ -15,6 +15,7 @@ Upon connecting, the client will issue a connection handshake to the server cont
 * `Platform`: name of the Platform sensors this client will create.
 * `Architecture`: name of the Architecture sensors this client will create.
 * `Mapping`: metadata indicating how to map fields coming from this client into JSON in LimaCharlie (see below).
+* `Mappings`: a list of `Mapping` (as defined above) that will be attempted, the first one to match on the `ParsingRE` field will be used.
 * `SensorSeedKey`: an arbitrary string used in generating the sensor IDs this client will create (see below).
 * `IsCompressed`: whether the cloud can expect the content shipped to it is compressed.
 * `DataFormat`: the rest of the connection can support `msgpack` or `json`.
