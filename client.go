@@ -66,7 +66,8 @@ type ClientOptions struct {
 	OnWarning func(string) `json:"-" yaml:"-"`
 
 	// Auto-detect if not specified (preferred).
-	DestURL string `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
+	DestURL string        `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
+	GenURL  func() string `json:"-" yaml:"-"`
 }
 
 func (o ClientOptions) Validate() error {
@@ -194,7 +195,11 @@ func (c *Client) connect() error {
 	c.isStart.Clear()
 
 	// Connect the websocket.
-	conn, _, err := websocket.DefaultDialer.Dial(c.wssURL, nil)
+	url := c.wssURL
+	if c.options.GenURL != nil {
+		url = c.options.GenURL()
+	}
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		c.onError(fmt.Errorf("Dial(): %v", err))
 		c.setLastError(err)
