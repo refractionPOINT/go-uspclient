@@ -40,10 +40,16 @@ type MappingDescriptor struct {
 	// all other fields in place. The default behavior
 	// is to replace the final event with only the
 	// mapped values.
-	IsRenameOnly bool           `json:"rename_only,omitempty" yaml:"rename_only,omitempty"`
-	Mappings     []FieldMapping `json:"mappings,omitempty" yaml:"mappings,omitempty"`
+	// Deprecated: field mappings are now deprecated in favor of transforms.
+	IsRenameOnly bool `json:"rename_only,omitempty" yaml:"rename_only,omitempty"`
+	// Deprecated: field mappings are now deprecated in favor of transforms.
+	Mappings []FieldMapping `json:"mappings,omitempty" yaml:"mappings,omitempty"`
+
+	// Transform applied to the events.
+	Transform map[string]interface{} `json:"transform,omitempty" yaml:"transform,omitempty"`
 }
 
+// Deprecated: field mappings are now deprecated in favor of transforms.
 type FieldMapping struct {
 	// Map the source field to the destination field.
 	SourceField      string `json:"src_field" yaml:"src_field"`
