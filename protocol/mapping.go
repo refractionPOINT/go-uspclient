@@ -36,6 +36,10 @@ type MappingDescriptor struct {
 	// the Event Time (converted to a ms epoch).
 	EventTimePath string `json:"event_time_path,omitempty" yaml:"event_time_path,omitempty"`
 
+	// Path to the component that should be used as
+	// the Investigation ID of a specific event.
+	InvestigationIDPath string `json:"investigation_id_path,omitempty" yaml:"investigation_id_path,omitempty"`
+
 	// Rename the fields in the Mappings but leave
 	// all other fields in place. The default behavior
 	// is to replace the final event with only the
