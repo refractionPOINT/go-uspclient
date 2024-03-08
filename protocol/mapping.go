@@ -51,6 +51,9 @@ type MappingDescriptor struct {
 
 	// Transform applied to the events.
 	Transform map[string]interface{} `json:"transform,omitempty" yaml:"transform,omitempty"`
+
+	// List of field paths to drop upon ingestion.
+	DropFields []string `json:"drop_fields,omitempty" yaml:"drop_fields,omitempty"`
 }
 
 // Deprecated: field mappings are now deprecated in favor of transforms.
