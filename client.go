@@ -294,12 +294,15 @@ func (c *Client) Reconnect() {
 	if !atomic.CompareAndSwapUint32(&c.isReconnecting, 0, 1) {
 		return
 	}
-	c.ab.UpdateCapacity(1)
+
 	go func() {
 		if err := c.disconnect(); err != nil {
 			c.setLastError(err)
 			c.onWarning(fmt.Sprintf("error disconnecting: %v", err))
 		}
+
+		// Start the window size back to 1.
+		c.ab.UpdateCapacity(1)
 
 		// We assume that anything that was not ACKed should be resent
 		c.ab.ResetDelivery()
