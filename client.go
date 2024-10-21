@@ -68,6 +68,9 @@ type ClientOptions struct {
 	// Auto-detect if not specified (preferred).
 	DestURL string        `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
 	GenURL  func() string `json:"-" yaml:"-"`
+
+	// Simple flag to operate the client as a sink for testing.
+	TestSinkMode bool
 }
 
 func (o ClientOptions) Validate() error {
@@ -104,6 +107,11 @@ func (o ClientOptions) Validate() error {
 var ErrorBufferFull = errors.New("buffer full")
 
 func NewClient(o ClientOptions) (*Client, error) {
+	if o.TestSinkMode {
+		return &Client{
+			options: o,
+		}, nil
+	}
 	// Get an SDK instance so we can resolve the datacenter.
 	org, err := lc.NewOrganizationFromClientOptions(lc.ClientOptions{
 		OID: o.Identity.Oid,
@@ -166,6 +174,9 @@ func NewClient(o ClientOptions) (*Client, error) {
 }
 
 func (c *Client) Drain(timeout time.Duration) error {
+	if c.options.TestSinkMode {
+		return nil
+	}
 	c.log("usp-client draining")
 	c.ab.Close()
 	if !c.ab.GetEmptyEvent().WaitFor(timeout) {
@@ -175,6 +186,9 @@ func (c *Client) Drain(timeout time.Duration) error {
 }
 
 func (c *Client) Close() ([]*protocol.DataMessage, error) {
+	if c.options.TestSinkMode {
+		return nil, nil
+	}
 	c.log("usp-client closing")
 	c.isClosing = true
 	c.ab.Close()
@@ -285,6 +299,9 @@ func (c *Client) disconnect() error {
 }
 
 func (c *Client) Reconnect() {
+	if c.options.TestSinkMode {
+		return
+	}
 	if c.isClosing {
 		// If we're actually closing ignore
 		// requests for reconnecting.
@@ -324,6 +341,9 @@ func (c *Client) Reconnect() {
 }
 
 func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) error {
+	if c.options.TestSinkMode {
+		return nil
+	}
 	if !c.ab.Add(message, timeout) {
 		return ErrorBufferFull
 	}
@@ -332,6 +352,9 @@ func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) erro
 }
 
 func (c *Client) GetUnsent() ([]*protocol.DataMessage, error) {
+	if c.options.TestSinkMode {
+		return nil, nil
+	}
 	messages, err := c.ab.GetUnAcked()
 	if err != nil {
 		c.setLastError(err)
