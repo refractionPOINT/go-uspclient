@@ -70,7 +70,7 @@ type ClientOptions struct {
 	GenURL  func() string `json:"-" yaml:"-"`
 
 	// Simple flag to operate the client as a sink for testing.
-	TestSinkMode bool
+	TestSinkMode bool `json:"-" yaml:"-"`
 }
 
 func (o ClientOptions) Validate() error {
