@@ -54,6 +54,10 @@ type MappingDescriptor struct {
 
 	// List of field paths to drop upon ingestion.
 	DropFields []string `json:"drop_fields,omitempty" yaml:"drop_fields,omitempty"`
+
+	// Path to a field containing a Sensor ID that already exists whithin the tenant
+	// where the given event should be CCed to.
+	SensorIDReplicationPath string `json:"sid_replication_path,omitempty" yaml:"sid_replication_path,omitempty"`
 }
 
 // Deprecated: field mappings are now deprecated in favor of transforms.
