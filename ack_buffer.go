@@ -154,7 +154,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		if b.nextIndexToDeliver < uint64(len(b.buff)) && b.buff[b.nextIndexToDeliver] != nil {
 			nextSeq = b.buff[b.nextIndexToDeliver].SeqNum
 		}
-		return fmt.Errorf("acked message (seq: %d) has not yet been delivered (next: %d)", seq, nextSeq)
+		return fmt.Errorf("acked message (seq: %d, index: %d) has not yet been delivered (next_seq: %d, next_index: %d)", seq, indexAcked, nextSeq, b.nextIndexToDeliver)
 	}
 	b.firstSeqNum = seq + 1
 	for i := indexAcked + 1; i < uint64(len(b.buff)); i++ {
