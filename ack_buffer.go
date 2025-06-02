@@ -109,7 +109,7 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 			isRunning := b.isRunning
 			b.Unlock()
 			if !isRunning {
-				break
+				return false
 			}
 			if !deadline.IsZero() && time.Now().After(deadline) {
 				break
