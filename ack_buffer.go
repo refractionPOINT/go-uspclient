@@ -72,6 +72,17 @@ func (b *AckBuffer) Close() {
 }
 
 func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
+	if e == nil {
+		return false
+	}
+
+	b.RLock()
+	isRunning := b.isRunning
+	b.RUnlock()
+	if !isRunning {
+		return false
+	}
+
 	hasBeenAdded := false
 	var deadline time.Time
 	if timeout != 0 {
@@ -134,7 +145,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	if seq < b.firstSeqNum && uint64(len(b.buff))-(math.MaxUint64-b.firstSeqNum) <= seq {
 		return fmt.Errorf("unexpected acked sequence number: %d", seq)
 	}
-	if seq >= b.nextSeqNum && b.nextSeqNum >= math.MaxUint64-seq {
+	if seq >= b.nextSeqNum && seq != math.MaxUint64 && b.nextSeqNum != 0 {
 		return fmt.Errorf("unexpected acked sequence number: %d", seq)
 	}
 	indexAcked := seq - b.firstSeqNum
