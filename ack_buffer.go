@@ -149,13 +149,27 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		return fmt.Errorf("unexpected acked sequence number: %d", seq)
 	}
 	indexAcked := seq - b.firstSeqNum
-	if indexAcked >= b.nextIndexToDeliver {
-		nextSeq := uint64(0)
-		if b.nextIndexToDeliver < uint64(len(b.buff)) && b.buff[b.nextIndexToDeliver] != nil {
-			nextSeq = b.buff[b.nextIndexToDeliver].SeqNum
-		}
-		return fmt.Errorf("acked message (seq: %d, index: %d) has not yet been delivered (next_seq: %d, next_index: %d)", seq, indexAcked, nextSeq, b.nextIndexToDeliver)
+
+	// Check if the message exists in the buffer
+	if indexAcked >= uint64(len(b.buff)) || indexAcked >= b.nextIndexFree {
+		return fmt.Errorf("acked message (seq: %d) is not in buffer", seq)
 	}
+
+	// Check if the message has been delivered, but with special handling for edge cases
+	if indexAcked >= b.nextIndexToDeliver {
+		// Special case: if nextIndexToDeliver is 0 (likely due to ResetDelivery)
+		// and we're trying to ACK the first message in the buffer, allow it
+		if b.nextIndexToDeliver == 0 && indexAcked == 0 {
+			// This is the ResetDelivery scenario - allow ACKing the first message
+		} else {
+			nextSeq := uint64(0)
+			if b.nextIndexToDeliver < uint64(len(b.buff)) && b.buff[b.nextIndexToDeliver] != nil {
+				nextSeq = b.buff[b.nextIndexToDeliver].SeqNum
+			}
+			return fmt.Errorf("acked message (seq: %d, index: %d) has not yet been delivered (next_seq: %d, next_index: %d)", seq, indexAcked, nextSeq, b.nextIndexToDeliver)
+		}
+	}
+
 	b.firstSeqNum = seq + 1
 	for i := indexAcked + 1; i < uint64(len(b.buff)); i++ {
 		b.buff[i-indexAcked-1] = b.buff[i]
@@ -165,7 +179,14 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		b.buff[i] = nil
 	}
 	b.isAvailable.Set()
-	b.nextIndexToDeliver -= (indexAcked + 1)
+
+	// Adjust nextIndexToDeliver to account for removed messages
+	if b.nextIndexToDeliver > indexAcked+1 {
+		b.nextIndexToDeliver -= (indexAcked + 1)
+	} else {
+		b.nextIndexToDeliver = 0
+	}
+
 	if b.nextIndexToDeliver >= b.nextIndexFree {
 		b.isReadyToDeliver.Clear()
 		b.isEmpty.Set()

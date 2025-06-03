@@ -800,3 +800,48 @@ func TestAckBufferConcurrentClose(t *testing.T) {
 		t.Error("should not have been able to get message after close")
 	}
 }
+
+func TestAckBufferResetDeliveryWithAcks(t *testing.T) {
+	b, err := NewAckBuffer(AckBufferOptions{})
+	if err != nil {
+		t.Errorf("failed creating ack buffer: %v", err)
+		return
+	}
+	b.UpdateCapacity(5)
+
+	// Add messages 1-5
+	for i := 0; i < 5; i++ {
+		if !b.Add(&protocol.DataMessage{}, 0) {
+			t.Errorf("failed to add message %d", i+1)
+		}
+	}
+
+	// Deliver messages 1-3
+	for i := 0; i < 3; i++ {
+		if b.GetNextToDeliver(0) == nil {
+			t.Errorf("should have a message to deliver at %d", i+1)
+		}
+	}
+
+	// Ack messages 1-2 (this advances firstSeqNum to 3)
+	for i := 1; i <= 2; i++ {
+		if err := b.Ack(uint64(i)); err != nil {
+			t.Errorf("failed to ack message %d: %v", i, err)
+		}
+	}
+
+	// At this point:
+	// - firstSeqNum = 3 (after acking seq 2)
+	// - nextIndexToDeliver = 1 (one message delivered but not yet acked)
+	// - Buffer contains messages 3-5
+
+	// Reset delivery (simulating reconnection)
+	b.ResetDelivery()
+
+	// Now nextIndexToDeliver = 0, but firstSeqNum is still 3
+	// This should work after our fix - we can ACK message 3 even though
+	// it's considered "undelivered" after ResetDelivery
+	if err := b.Ack(3); err != nil {
+		t.Errorf("should be able to ack message 3 after ResetDelivery, but got error: %v", err)
+	}
+}
