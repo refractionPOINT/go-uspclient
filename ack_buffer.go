@@ -152,7 +152,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 
 	// Check if the message exists in the buffer
 	if indexAcked >= uint64(len(b.buff)) || indexAcked >= b.nextIndexFree {
-		return fmt.Errorf("acked message (seq: %d) is not in buffer", seq)
+		return fmt.Errorf("acked message (seq: %d i:%d len:%d free:%d) is not in buffer", seq, indexAcked, len(b.buff), b.nextIndexFree)
 	}
 
 	// Check if the message has been delivered, but with special handling for edge cases
