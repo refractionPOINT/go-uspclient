@@ -1,13 +1,21 @@
 package uspclient
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -71,6 +79,11 @@ type ClientOptions struct {
 
 	// Simple flag to operate the client as a sink for testing.
 	TestSinkMode bool `json:"-" yaml:"-"`
+
+	// Proxy configuration for connecting to LimaCharlie cloud
+	ProxyURL      string `json:"proxy_url,omitempty" yaml:"proxy_url,omitempty"`
+	ProxyUsername string `json:"proxy_username,omitempty" yaml:"proxy_username,omitempty"`
+	ProxyPassword string `json:"proxy_password,omitempty" yaml:"proxy_password,omitempty"`
 }
 
 func (o ClientOptions) Validate() error {
@@ -202,6 +215,77 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	return messages, err
 }
 
+// createProxyDialer creates a custom dialer that uses HTTP CONNECT for proxy tunneling
+func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
+	if c.options.ProxyURL == "" {
+		// No proxy configured, use default dialer
+		return websocket.DefaultDialer, nil
+	}
+
+	proxyURL, err := url.Parse(c.options.ProxyURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %v", err)
+	}
+
+	dialer := &websocket.Dialer{
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: 45 * time.Second,
+		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Connect to proxy
+			proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 10*time.Second)
+			if err != nil {
+				return nil, fmt.Errorf("failed to connect to proxy: %v", err)
+			}
+
+			// Send HTTP CONNECT request
+			connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
+			
+			// Add proxy authentication if provided
+			if c.options.ProxyUsername != "" && c.options.ProxyPassword != "" {
+				auth := base64.StdEncoding.EncodeToString([]byte(c.options.ProxyUsername + ":" + c.options.ProxyPassword))
+				connectReq += fmt.Sprintf("Proxy-Authorization: Basic %s\r\n", auth)
+			}
+			
+			connectReq += "\r\n"
+
+			// Send CONNECT request
+			if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
+				proxyConn.Close()
+				return nil, fmt.Errorf("failed to send CONNECT request: %v", err)
+			}
+
+			// Read response
+			reader := bufio.NewReader(proxyConn)
+			resp, err := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+			if err != nil {
+				proxyConn.Close()
+				return nil, fmt.Errorf("failed to read CONNECT response: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				proxyConn.Close()
+				return nil, fmt.Errorf("proxy returned status %d", resp.StatusCode)
+			}
+
+			// Connection established, return the tunnel
+			return proxyConn, nil
+		},
+	}
+
+	// If the target is HTTPS/WSS, we need to handle TLS
+	// Extract hostname from the WebSocket URL for TLS SNI
+	targetURL, err := url.Parse(c.wssURL)
+	if err == nil && targetURL.Host != "" {
+		hostname := targetURL.Hostname()
+		dialer.TLSClientConfig = &tls.Config{
+			ServerName: hostname,
+		}
+	}
+
+	return dialer, nil
+}
+
 func (c *Client) connect() error {
 	c.log("usp-client connecting")
 	c.connMutex.Lock()
@@ -213,7 +297,34 @@ func (c *Client) connect() error {
 	if c.options.GenURL != nil {
 		url = c.options.GenURL()
 	}
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+
+	// Create dialer with proxy support if configured
+	dialer, err := c.createProxyDialer()
+	if err != nil {
+		c.onError(fmt.Errorf("createProxyDialer(): %v", err))
+		c.setLastError(err)
+		return err
+	}
+
+	// Try to connect with retry logic for proxy connections
+	var conn *websocket.Conn
+	maxRetries := 1
+	if c.options.ProxyURL != "" {
+		maxRetries = 3 // 3 retries for proxy connections
+	}
+
+	for i := 0; i < maxRetries; i++ {
+		conn, _, err = dialer.Dial(url, nil)
+		if err == nil {
+			break
+		}
+		
+		if i < maxRetries-1 {
+			c.onWarning(fmt.Sprintf("Dial attempt %d failed: %v, retrying...", i+1, err))
+			time.Sleep(time.Duration(i+1) * time.Second) // Exponential backoff
+		}
+	}
+
 	if err != nil {
 		c.onError(fmt.Errorf("Dial(): %v", err))
 		c.setLastError(err)
