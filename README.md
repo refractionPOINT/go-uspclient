@@ -1,6 +1,45 @@
 # go-uspclient
 Golang USP Client
 
+## Features
+- WebSocket-based communication with LimaCharlie cloud
+- Automatic flow control and message acknowledgment
+- Built-in compression support
+- HTTP CONNECT proxy support for restricted networks
+- Flexible event mapping and transformation
+
+## Proxy Support
+The USP client supports connecting to LimaCharlie cloud through HTTP CONNECT proxies. This is useful in enterprise environments where direct internet access is restricted.
+
+### Configuration
+Add proxy settings to your `ClientOptions`:
+
+```go
+options := uspclient.ClientOptions{
+    Identity: uspclient.Identity{
+        Oid:             "your-org-id",
+        InstallationKey: "your-key",
+    },
+    Platform: "your-platform",
+    
+    // Proxy configuration
+    ProxyURL:      "http://proxy.example.com:8080",
+    ProxyUsername: "username",  // optional
+    ProxyPassword: "password",  // optional
+}
+```
+
+The proxy settings support:
+- HTTP CONNECT tunneling for WebSocket connections
+- HTTP Basic authentication
+- Automatic retry (3 attempts) on proxy connection failures
+- Proper TLS/SSL negotiation through the proxy
+
+### Validation
+The client validates proxy configuration during initialization:
+- Proxy URL must be valid if provided
+- If authentication is used, both username and password must be provided
+
 ## Protocol
 USP is based on a secure websocket connection to the relevant LimaCharlie datacenter and is formatted in JSON.
 

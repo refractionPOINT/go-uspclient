@@ -96,6 +96,17 @@ func (o ClientOptions) Validate() error {
 		return errors.New("missing platform")
 	}
 
+	// Validate proxy configuration if provided
+	if o.ProxyURL != "" {
+		if _, err := url.Parse(o.ProxyURL); err != nil {
+			return fmt.Errorf("invalid proxy URL: %v", err)
+		}
+		// If proxy URL is provided but authentication is incomplete, warn
+		if (o.ProxyUsername != "" && o.ProxyPassword == "") || (o.ProxyUsername == "" && o.ProxyPassword != "") {
+			return errors.New("proxy authentication requires both username and password")
+		}
+	}
+
 	for i, desc := range o.Indexing {
 		if err := desc.Validate(); err != nil {
 			return fmt.Errorf("index descriptor %d invalid: %v", i, err)
@@ -227,14 +238,23 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 	}
 
 	dialer := &websocket.Dialer{
-		Proxy:            http.ProxyFromEnvironment,
+		Proxy:            nil, // We handle proxy ourselves via NetDialContext
 		HandshakeTimeout: 45 * time.Second,
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Connect to proxy
-			proxyConn, err := net.DialTimeout("tcp", proxyURL.Host, 10*time.Second)
+			// Connect to proxy with context
+			var d net.Dialer
+			d.Timeout = 10 * time.Second
+			proxyConn, err := d.DialContext(ctx, "tcp", proxyURL.Host)
 			if err != nil {
 				return nil, fmt.Errorf("failed to connect to proxy: %v", err)
 			}
+			
+			// Ensure cleanup on error
+			defer func() {
+				if err != nil {
+					proxyConn.Close()
+				}
+			}()
 
 			// Send HTTP CONNECT request
 			connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
@@ -248,8 +268,7 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 			connectReq += "\r\n"
 
 			// Send CONNECT request
-			if _, err := proxyConn.Write([]byte(connectReq)); err != nil {
-				proxyConn.Close()
+			if _, err = proxyConn.Write([]byte(connectReq)); err != nil {
 				return nil, fmt.Errorf("failed to send CONNECT request: %v", err)
 			}
 
@@ -257,14 +276,13 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 			reader := bufio.NewReader(proxyConn)
 			resp, err := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
 			if err != nil {
-				proxyConn.Close()
 				return nil, fmt.Errorf("failed to read CONNECT response: %v", err)
 			}
 			defer resp.Body.Close()
 
 			if resp.StatusCode != 200 {
-				proxyConn.Close()
-				return nil, fmt.Errorf("proxy returned status %d", resp.StatusCode)
+				err = fmt.Errorf("proxy returned status %d", resp.StatusCode)
+				return nil, err
 			}
 
 			// Connection established, return the tunnel
