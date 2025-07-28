@@ -1,11 +1,17 @@
 package uspclient
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"sync"
@@ -48,6 +54,15 @@ type Identity struct {
 	InstallationKey string `json:"installation_key" yaml:"installation_key"`
 }
 
+type ProxyOptions struct {
+	URL               string        `json:"url,omitempty" yaml:"url,omitempty"`
+	Username          string        `json:"username,omitempty" yaml:"username,omitempty"`
+	Password          string        `json:"password,omitempty" yaml:"password,omitempty"`
+	HandshakeTimeout  time.Duration `json:"handshake_timeout,omitempty" yaml:"handshake_timeout,omitempty"`
+	ConnectTimeout    time.Duration `json:"connect_timeout,omitempty" yaml:"connect_timeout,omitempty"`
+	ReadWriteTimeout  time.Duration `json:"read_write_timeout,omitempty" yaml:"read_write_timeout,omitempty"`
+}
+
 type ClientOptions struct {
 	Identity      Identity                     `json:"identity" yaml:"identity"`
 	Hostname      string                       `json:"hostname,omitempty" yaml:"hostname,omitempty"`
@@ -71,6 +86,22 @@ type ClientOptions struct {
 
 	// Simple flag to operate the client as a sink for testing.
 	TestSinkMode bool `json:"-" yaml:"-"`
+
+	// Proxy configuration for connecting to LimaCharlie cloud
+	Proxy ProxyOptions `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+}
+
+func (o *ClientOptions) normalizeProxyConfig() {
+	// Set default timeouts if not specified
+	if o.Proxy.HandshakeTimeout == 0 {
+		o.Proxy.HandshakeTimeout = 45 * time.Second
+	}
+	if o.Proxy.ConnectTimeout == 0 {
+		o.Proxy.ConnectTimeout = 10 * time.Second
+	}
+	if o.Proxy.ReadWriteTimeout == 0 {
+		o.Proxy.ReadWriteTimeout = 30 * time.Second
+	}
 }
 
 func (o ClientOptions) Validate() error {
@@ -82,6 +113,24 @@ func (o ClientOptions) Validate() error {
 	}
 	if o.Platform == "" {
 		return errors.New("missing platform")
+	}
+
+	// Validate proxy configuration if provided
+	if o.Proxy.URL != "" {
+		parsedURL, err := url.Parse(o.Proxy.URL)
+		if err != nil {
+			return fmt.Errorf("invalid proxy URL: %v", err)
+		}
+		
+		// Check if URL contains credentials
+		if parsedURL.User != nil {
+			return errors.New("proxy URL must not contain credentials - use proxy.username and proxy.password fields instead")
+		}
+		
+		// Check authentication completeness
+		if (o.Proxy.Username != "" && o.Proxy.Password == "") || (o.Proxy.Username == "" && o.Proxy.Password != "") {
+			return errors.New("proxy authentication requires both username and password")
+		}
 	}
 
 	for i, desc := range o.Indexing {
@@ -107,6 +156,9 @@ func (o ClientOptions) Validate() error {
 var ErrorBufferFull = errors.New("buffer full")
 
 func NewClient(o ClientOptions) (*Client, error) {
+	// Normalize proxy configuration for backward compatibility
+	o.normalizeProxyConfig()
+	
 	if o.TestSinkMode {
 		return &Client{
 			options: o,
@@ -202,6 +254,105 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	return messages, err
 }
 
+// createProxyDialer creates a custom dialer that uses HTTP CONNECT for proxy tunneling
+func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
+	if c.options.Proxy.URL == "" {
+		// No proxy configured, use default dialer
+		return websocket.DefaultDialer, nil
+	}
+
+	proxyURL, err := url.Parse(c.options.Proxy.URL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid proxy URL: %v", err)
+	}
+
+	dialer := &websocket.Dialer{
+		Proxy:            nil, // We handle proxy ourselves via NetDialContext
+		HandshakeTimeout: c.options.Proxy.HandshakeTimeout,
+		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Connect to proxy with context
+			var d net.Dialer
+			d.Timeout = c.options.Proxy.ConnectTimeout
+			proxyConn, err := d.DialContext(ctx, "tcp", proxyURL.Host)
+			if err != nil {
+				return nil, fmt.Errorf("failed to connect to proxy: %v", err)
+			}
+			
+			// Ensure cleanup on error
+			defer func() {
+				if err != nil {
+					proxyConn.Close()
+				}
+			}()
+
+			// Set deadline for proxy operations
+			if err := proxyConn.SetDeadline(time.Now().Add(c.options.Proxy.ReadWriteTimeout)); err != nil {
+				return nil, fmt.Errorf("failed to set deadline: %v", err)
+			}
+
+			// Create HTTP CONNECT request using http.Request for better standards compliance
+			connectReq := &http.Request{
+				Method: "CONNECT",
+				URL:    &url.URL{Opaque: addr},
+				Host:   addr,
+				Header: make(http.Header),
+				Proto:  "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+			}
+			
+			// Add proxy authentication if provided
+			if c.options.Proxy.Username != "" && c.options.Proxy.Password != "" {
+				connectReq.Header.Set("Proxy-Authorization", connectReq.Header.Get("Authorization"))
+				connectReq.SetBasicAuth(c.options.Proxy.Username, c.options.Proxy.Password)
+				// Move Authorization header to Proxy-Authorization
+				if auth := connectReq.Header.Get("Authorization"); auth != "" {
+					connectReq.Header.Set("Proxy-Authorization", auth)
+					connectReq.Header.Del("Authorization")
+				}
+			}
+			
+			// Write the CONNECT request
+			if err = connectReq.Write(proxyConn); err != nil {
+				return nil, fmt.Errorf("failed to send CONNECT request: %v", err)
+			}
+
+			// Read response
+			reader := bufio.NewReader(proxyConn)
+			resp, err := http.ReadResponse(reader, connectReq)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read CONNECT response: %v", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				err = fmt.Errorf("proxy returned status %d", resp.StatusCode)
+				return nil, err
+			}
+
+			// Clear deadline after successful CONNECT
+			if err := proxyConn.SetDeadline(time.Time{}); err != nil {
+				return nil, fmt.Errorf("failed to clear deadline: %v", err)
+			}
+
+			// Connection established, return the tunnel
+			return proxyConn, nil
+		},
+	}
+
+	// If the target is HTTPS/WSS, we need to handle TLS
+	// Extract hostname from the WebSocket URL for TLS SNI
+	targetURL, err := url.Parse(c.wssURL)
+	if err == nil && targetURL.Host != "" {
+		hostname := targetURL.Hostname()
+		dialer.TLSClientConfig = &tls.Config{
+			ServerName: hostname,
+		}
+	}
+
+	return dialer, nil
+}
+
 func (c *Client) connect() error {
 	c.log("usp-client connecting")
 	c.connMutex.Lock()
@@ -213,7 +364,34 @@ func (c *Client) connect() error {
 	if c.options.GenURL != nil {
 		url = c.options.GenURL()
 	}
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+
+	// Create dialer with proxy support if configured
+	dialer, err := c.createProxyDialer()
+	if err != nil {
+		c.onError(fmt.Errorf("createProxyDialer(): %v", err))
+		c.setLastError(err)
+		return err
+	}
+
+	// Try to connect with retry logic for proxy connections
+	var conn *websocket.Conn
+	maxRetries := 1
+	if c.options.Proxy.URL != "" {
+		maxRetries = 3 // 3 retries for proxy connections
+	}
+
+	for i := 0; i < maxRetries; i++ {
+		conn, _, err = dialer.Dial(url, nil)
+		if err == nil {
+			break
+		}
+		
+		if i < maxRetries-1 {
+			c.onWarning(fmt.Sprintf("Dial attempt %d failed: %v, retrying...", i+1, err))
+			time.Sleep(time.Duration(i+1) * time.Second) // Exponential backoff
+		}
+	}
+
 	if err != nil {
 		c.onError(fmt.Errorf("Dial(): %v", err))
 		c.setLastError(err)
