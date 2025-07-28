@@ -6,7 +6,6 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -55,6 +54,15 @@ type Identity struct {
 	InstallationKey string `json:"installation_key" yaml:"installation_key"`
 }
 
+type ProxyOptions struct {
+	URL               string        `json:"url,omitempty" yaml:"url,omitempty"`
+	Username          string        `json:"username,omitempty" yaml:"username,omitempty"`
+	Password          string        `json:"password,omitempty" yaml:"password,omitempty"`
+	HandshakeTimeout  time.Duration `json:"handshake_timeout,omitempty" yaml:"handshake_timeout,omitempty"`
+	ConnectTimeout    time.Duration `json:"connect_timeout,omitempty" yaml:"connect_timeout,omitempty"`
+	ReadWriteTimeout  time.Duration `json:"read_write_timeout,omitempty" yaml:"read_write_timeout,omitempty"`
+}
+
 type ClientOptions struct {
 	Identity      Identity                     `json:"identity" yaml:"identity"`
 	Hostname      string                       `json:"hostname,omitempty" yaml:"hostname,omitempty"`
@@ -80,9 +88,43 @@ type ClientOptions struct {
 	TestSinkMode bool `json:"-" yaml:"-"`
 
 	// Proxy configuration for connecting to LimaCharlie cloud
-	ProxyURL      string `json:"proxy_url,omitempty" yaml:"proxy_url,omitempty"`
+	Proxy ProxyOptions `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+
+	// Deprecated: Use Proxy.URL instead
+	ProxyURL string `json:"proxy_url,omitempty" yaml:"proxy_url,omitempty"`
+	// Deprecated: Use Proxy.Username instead
 	ProxyUsername string `json:"proxy_username,omitempty" yaml:"proxy_username,omitempty"`
+	// Deprecated: Use Proxy.Password instead
 	ProxyPassword string `json:"proxy_password,omitempty" yaml:"proxy_password,omitempty"`
+}
+
+func (o *ClientOptions) normalizeProxyConfig() {
+	// Handle backward compatibility - migrate deprecated fields to new structure
+	if o.Proxy.URL == "" && o.ProxyURL != "" {
+		o.Proxy.URL = o.ProxyURL
+	}
+	if o.Proxy.Username == "" && o.ProxyUsername != "" {
+		o.Proxy.Username = o.ProxyUsername
+	}
+	if o.Proxy.Password == "" && o.ProxyPassword != "" {
+		o.Proxy.Password = o.ProxyPassword
+	}
+	
+	// Always clear deprecated fields after migration
+	o.ProxyURL = ""
+	o.ProxyUsername = ""
+	o.ProxyPassword = ""
+
+	// Set default timeouts if not specified
+	if o.Proxy.HandshakeTimeout == 0 {
+		o.Proxy.HandshakeTimeout = 45 * time.Second
+	}
+	if o.Proxy.ConnectTimeout == 0 {
+		o.Proxy.ConnectTimeout = 10 * time.Second
+	}
+	if o.Proxy.ReadWriteTimeout == 0 {
+		o.Proxy.ReadWriteTimeout = 30 * time.Second
+	}
 }
 
 func (o ClientOptions) Validate() error {
@@ -97,12 +139,33 @@ func (o ClientOptions) Validate() error {
 	}
 
 	// Validate proxy configuration if provided
-	if o.ProxyURL != "" {
-		if _, err := url.Parse(o.ProxyURL); err != nil {
+	proxyURL := o.Proxy.URL
+	if proxyURL == "" {
+		proxyURL = o.ProxyURL // Check deprecated field too
+	}
+	
+	if proxyURL != "" {
+		parsedURL, err := url.Parse(proxyURL)
+		if err != nil {
 			return fmt.Errorf("invalid proxy URL: %v", err)
 		}
-		// If proxy URL is provided but authentication is incomplete, warn
-		if (o.ProxyUsername != "" && o.ProxyPassword == "") || (o.ProxyUsername == "" && o.ProxyPassword != "") {
+		
+		// Check if URL contains credentials
+		if parsedURL.User != nil {
+			return errors.New("proxy URL must not contain credentials - use proxy.username and proxy.password fields instead")
+		}
+		
+		// Check authentication completeness
+		username := o.Proxy.Username
+		password := o.Proxy.Password
+		if username == "" {
+			username = o.ProxyUsername // Check deprecated field
+		}
+		if password == "" {
+			password = o.ProxyPassword // Check deprecated field
+		}
+		
+		if (username != "" && password == "") || (username == "" && password != "") {
 			return errors.New("proxy authentication requires both username and password")
 		}
 	}
@@ -130,6 +193,9 @@ func (o ClientOptions) Validate() error {
 var ErrorBufferFull = errors.New("buffer full")
 
 func NewClient(o ClientOptions) (*Client, error) {
+	// Normalize proxy configuration for backward compatibility
+	o.normalizeProxyConfig()
+	
 	if o.TestSinkMode {
 		return &Client{
 			options: o,
@@ -227,23 +293,23 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 
 // createProxyDialer creates a custom dialer that uses HTTP CONNECT for proxy tunneling
 func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
-	if c.options.ProxyURL == "" {
+	if c.options.Proxy.URL == "" {
 		// No proxy configured, use default dialer
 		return websocket.DefaultDialer, nil
 	}
 
-	proxyURL, err := url.Parse(c.options.ProxyURL)
+	proxyURL, err := url.Parse(c.options.Proxy.URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid proxy URL: %v", err)
 	}
 
 	dialer := &websocket.Dialer{
 		Proxy:            nil, // We handle proxy ourselves via NetDialContext
-		HandshakeTimeout: 45 * time.Second,
+		HandshakeTimeout: c.options.Proxy.HandshakeTimeout,
 		NetDialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// Connect to proxy with context
 			var d net.Dialer
-			d.Timeout = 10 * time.Second
+			d.Timeout = c.options.Proxy.ConnectTimeout
 			proxyConn, err := d.DialContext(ctx, "tcp", proxyURL.Host)
 			if err != nil {
 				return nil, fmt.Errorf("failed to connect to proxy: %v", err)
@@ -256,25 +322,41 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 				}
 			}()
 
-			// Send HTTP CONNECT request
-			connectReq := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n", addr, addr)
-			
-			// Add proxy authentication if provided
-			if c.options.ProxyUsername != "" && c.options.ProxyPassword != "" {
-				auth := base64.StdEncoding.EncodeToString([]byte(c.options.ProxyUsername + ":" + c.options.ProxyPassword))
-				connectReq += fmt.Sprintf("Proxy-Authorization: Basic %s\r\n", auth)
+			// Set deadline for proxy operations
+			if err := proxyConn.SetDeadline(time.Now().Add(c.options.Proxy.ReadWriteTimeout)); err != nil {
+				return nil, fmt.Errorf("failed to set deadline: %v", err)
+			}
+
+			// Create HTTP CONNECT request using http.Request for better standards compliance
+			connectReq := &http.Request{
+				Method: "CONNECT",
+				URL:    &url.URL{Opaque: addr},
+				Host:   addr,
+				Header: make(http.Header),
+				Proto:  "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
 			}
 			
-			connectReq += "\r\n"
-
-			// Send CONNECT request
-			if _, err = proxyConn.Write([]byte(connectReq)); err != nil {
+			// Add proxy authentication if provided
+			if c.options.Proxy.Username != "" && c.options.Proxy.Password != "" {
+				connectReq.Header.Set("Proxy-Authorization", connectReq.Header.Get("Authorization"))
+				connectReq.SetBasicAuth(c.options.Proxy.Username, c.options.Proxy.Password)
+				// Move Authorization header to Proxy-Authorization
+				if auth := connectReq.Header.Get("Authorization"); auth != "" {
+					connectReq.Header.Set("Proxy-Authorization", auth)
+					connectReq.Header.Del("Authorization")
+				}
+			}
+			
+			// Write the CONNECT request
+			if err = connectReq.Write(proxyConn); err != nil {
 				return nil, fmt.Errorf("failed to send CONNECT request: %v", err)
 			}
 
 			// Read response
 			reader := bufio.NewReader(proxyConn)
-			resp, err := http.ReadResponse(reader, &http.Request{Method: "CONNECT"})
+			resp, err := http.ReadResponse(reader, connectReq)
 			if err != nil {
 				return nil, fmt.Errorf("failed to read CONNECT response: %v", err)
 			}
@@ -283,6 +365,11 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 			if resp.StatusCode != 200 {
 				err = fmt.Errorf("proxy returned status %d", resp.StatusCode)
 				return nil, err
+			}
+
+			// Clear deadline after successful CONNECT
+			if err := proxyConn.SetDeadline(time.Time{}); err != nil {
+				return nil, fmt.Errorf("failed to clear deadline: %v", err)
 			}
 
 			// Connection established, return the tunnel
@@ -326,7 +413,7 @@ func (c *Client) connect() error {
 	// Try to connect with retry logic for proxy connections
 	var conn *websocket.Conn
 	maxRetries := 1
-	if c.options.ProxyURL != "" {
+	if c.options.Proxy.URL != "" {
 		maxRetries = 3 // 3 retries for proxy connections
 	}
 

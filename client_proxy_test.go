@@ -104,12 +104,13 @@ func basicAuth(username, password string) string {
 
 func TestClientOptions_Validate_ProxyConfig(t *testing.T) {
 	tests := []struct {
-		name        string
-		proxyURL    string
-		proxyUser   string
-		proxyPass   string
-		expectError bool
-		errorMsg    string
+		name           string
+		proxyURL       string
+		proxyUser      string
+		proxyPass      string
+		useDeprecated  bool
+		expectError    bool
+		errorMsg       string
 	}{
 		{
 			name:        "valid proxy URL",
@@ -145,6 +146,26 @@ func TestClientOptions_Validate_ProxyConfig(t *testing.T) {
 			expectError: true,
 			errorMsg:    "proxy authentication requires both username and password",
 		},
+		{
+			name:        "proxy URL with credentials",
+			proxyURL:    "http://user:pass@proxy.example.com:8080",
+			expectError: true,
+			errorMsg:    "proxy URL must not contain credentials",
+		},
+		{
+			name:          "deprecated fields - valid proxy URL",
+			proxyURL:      "http://proxy.example.com:8080",
+			useDeprecated: true,
+			expectError:   false,
+		},
+		{
+			name:          "deprecated fields - with auth",
+			proxyURL:      "http://proxy.example.com:8080",
+			proxyUser:     "user",
+			proxyPass:     "pass",
+			useDeprecated: true,
+			expectError:   false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -154,10 +175,19 @@ func TestClientOptions_Validate_ProxyConfig(t *testing.T) {
 					Oid:             "test-org",
 					InstallationKey: "test-key",
 				},
-				Platform:      "test",
-				ProxyURL:      tt.proxyURL,
-				ProxyUsername: tt.proxyUser,
-				ProxyPassword: tt.proxyPass,
+				Platform: "test",
+			}
+			
+			if tt.useDeprecated {
+				opts.ProxyURL = tt.proxyURL
+				opts.ProxyUsername = tt.proxyUser
+				opts.ProxyPassword = tt.proxyPass
+			} else {
+				opts.Proxy = ProxyOptions{
+					URL:      tt.proxyURL,
+					Username: tt.proxyUser,
+					Password: tt.proxyPass,
+				}
 			}
 
 			err := opts.Validate()
@@ -217,17 +247,23 @@ func TestCreateProxyDialer(t *testing.T) {
 				defer proxy.close()
 
 				proxyURL = proxy.URL()
-				client = &Client{
-					options: ClientOptions{
-						ProxyURL:      proxyURL,
-						ProxyUsername: username,
-						ProxyPassword: password,
+				opts := ClientOptions{
+					Proxy: ProxyOptions{
+						URL:      proxyURL,
+						Username: username,
+						Password: password,
 					},
+				}
+				opts.normalizeProxyConfig()
+				client = &Client{
+					options: opts,
 					wssURL: "wss://test.limacharlie.io/test",
 				}
 			} else {
+				opts := ClientOptions{}
+				opts.normalizeProxyConfig()
 				client = &Client{
-					options: ClientOptions{},
+					options: opts,
 					wssURL:  "wss://test.limacharlie.io/test",
 				}
 			}
@@ -256,12 +292,16 @@ func TestProxyDialerConnection(t *testing.T) {
 	assert.NoError(t, err)
 	defer proxy.close()
 
-	client := &Client{
-		options: ClientOptions{
-			ProxyURL:      proxy.URL(),
-			ProxyUsername: "testuser",
-			ProxyPassword: "testpass",
+	opts := ClientOptions{
+		Proxy: ProxyOptions{
+			URL:      proxy.URL(),
+			Username: "testuser",
+			Password: "testpass",
 		},
+	}
+	opts.normalizeProxyConfig()
+	client := &Client{
+		options: opts,
 		wssURL: "wss://test.limacharlie.io/test",
 	}
 
@@ -275,7 +315,9 @@ func TestProxyDialerConnection(t *testing.T) {
 	conn, err := dialer.NetDialContext(ctx, "tcp", "test.limacharlie.io:443")
 	assert.NoError(t, err)
 	assert.NotNil(t, conn)
-	conn.Close()
+	if conn != nil {
+		conn.Close()
+	}
 }
 
 func TestProxyDialerAuthFailure(t *testing.T) {
@@ -284,12 +326,16 @@ func TestProxyDialerAuthFailure(t *testing.T) {
 	assert.NoError(t, err)
 	defer proxy.close()
 
-	client := &Client{
-		options: ClientOptions{
-			ProxyURL:      proxy.URL(),
-			ProxyUsername: "wronguser",
-			ProxyPassword: "wrongpass",
+	opts := ClientOptions{
+		Proxy: ProxyOptions{
+			URL:      proxy.URL(),
+			Username: "wronguser",
+			Password: "wrongpass",
 		},
+	}
+	opts.normalizeProxyConfig()
+	client := &Client{
+		options: opts,
 		wssURL: "wss://test.limacharlie.io/test",
 	}
 
@@ -307,10 +353,14 @@ func TestProxyDialerAuthFailure(t *testing.T) {
 }
 
 func TestInvalidProxyURL(t *testing.T) {
-	client := &Client{
-		options: ClientOptions{
-			ProxyURL: "://invalid-url",
+	opts := ClientOptions{
+		Proxy: ProxyOptions{
+			URL: "://invalid-url",
 		},
+	}
+	opts.normalizeProxyConfig()
+	client := &Client{
+		options: opts,
 		wssURL: "wss://test.limacharlie.io/test",
 	}
 
@@ -318,4 +368,106 @@ func TestInvalidProxyURL(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid proxy URL")
 	assert.Nil(t, dialer)
+}
+
+func TestProxyTimeoutConfiguration(t *testing.T) {
+	tests := []struct {
+		name                     string
+		handshakeTimeout         time.Duration
+		connectTimeout           time.Duration
+		readWriteTimeout         time.Duration
+		expectedHandshakeTimeout time.Duration
+		expectedConnectTimeout   time.Duration
+		expectedReadWriteTimeout time.Duration
+	}{
+		{
+			name:                     "default timeouts",
+			handshakeTimeout:         0,
+			connectTimeout:           0,
+			readWriteTimeout:         0,
+			expectedHandshakeTimeout: 45 * time.Second,
+			expectedConnectTimeout:   10 * time.Second,
+			expectedReadWriteTimeout: 30 * time.Second,
+		},
+		{
+			name:                     "custom timeouts",
+			handshakeTimeout:         60 * time.Second,
+			connectTimeout:           20 * time.Second,
+			readWriteTimeout:         40 * time.Second,
+			expectedHandshakeTimeout: 60 * time.Second,
+			expectedConnectTimeout:   20 * time.Second,
+			expectedReadWriteTimeout: 40 * time.Second,
+		},
+		{
+			name:                     "partial custom timeouts",
+			handshakeTimeout:         0,
+			connectTimeout:           15 * time.Second,
+			readWriteTimeout:         0,
+			expectedHandshakeTimeout: 45 * time.Second,
+			expectedConnectTimeout:   15 * time.Second,
+			expectedReadWriteTimeout: 30 * time.Second,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := ClientOptions{
+				Proxy: ProxyOptions{
+					URL:              "http://proxy.example.com:8080",
+					HandshakeTimeout: tt.handshakeTimeout,
+					ConnectTimeout:   tt.connectTimeout,
+					ReadWriteTimeout: tt.readWriteTimeout,
+				},
+			}
+			opts.normalizeProxyConfig()
+
+			assert.Equal(t, tt.expectedHandshakeTimeout, opts.Proxy.HandshakeTimeout)
+			assert.Equal(t, tt.expectedConnectTimeout, opts.Proxy.ConnectTimeout)
+			assert.Equal(t, tt.expectedReadWriteTimeout, opts.Proxy.ReadWriteTimeout)
+		})
+	}
+}
+
+func TestBackwardCompatibility(t *testing.T) {
+	// Test that deprecated fields are properly migrated to new structure
+	opts := ClientOptions{
+		ProxyURL:      "http://proxy.example.com:8080",
+		ProxyUsername: "testuser",
+		ProxyPassword: "testpass",
+	}
+	opts.normalizeProxyConfig()
+
+	assert.Equal(t, "http://proxy.example.com:8080", opts.Proxy.URL)
+	assert.Equal(t, "testuser", opts.Proxy.Username)
+	assert.Equal(t, "testpass", opts.Proxy.Password)
+	
+	// Deprecated fields should be cleared
+	assert.Equal(t, "", opts.ProxyURL)
+	assert.Equal(t, "", opts.ProxyUsername)
+	assert.Equal(t, "", opts.ProxyPassword)
+}
+
+func TestMixedProxyConfiguration(t *testing.T) {
+	// Test that new config takes precedence over deprecated fields
+	opts := ClientOptions{
+		ProxyURL:      "http://old-proxy.example.com:8080",
+		ProxyUsername: "olduser",
+		ProxyPassword: "oldpass",
+		Proxy: ProxyOptions{
+			URL:      "http://new-proxy.example.com:8080",
+			Username: "newuser",
+			Password: "newpass",
+		},
+	}
+	opts.normalizeProxyConfig()
+
+	// New config should take precedence
+	assert.Equal(t, "http://new-proxy.example.com:8080", opts.Proxy.URL)
+	assert.Equal(t, "newuser", opts.Proxy.Username)
+	assert.Equal(t, "newpass", opts.Proxy.Password)
+	
+	// Deprecated fields should still be cleared
+	assert.Equal(t, "", opts.ProxyURL)
+	assert.Equal(t, "", opts.ProxyUsername)
+	assert.Equal(t, "", opts.ProxyPassword)
 }

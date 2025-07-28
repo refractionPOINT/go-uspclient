@@ -23,9 +23,30 @@ options := uspclient.ClientOptions{
     Platform: "your-platform",
     
     // Proxy configuration
+    Proxy: uspclient.ProxyOptions{
+        URL:      "http://proxy.example.com:8080",
+        Username: "username",  // optional
+        Password: "password",  // optional
+        
+        // Optional timeout configurations (with defaults)
+        HandshakeTimeout: 45 * time.Second,  // WebSocket handshake timeout
+        ConnectTimeout:   10 * time.Second,  // Proxy connection timeout
+        ReadWriteTimeout: 30 * time.Second,  // Proxy read/write timeout
+    },
+}
+```
+
+For backward compatibility, the following deprecated fields are still supported:
+```go
+options := uspclient.ClientOptions{
+    // ... other options ...
+    
+    // Deprecated: Use Proxy.URL instead
     ProxyURL:      "http://proxy.example.com:8080",
-    ProxyUsername: "username",  // optional
-    ProxyPassword: "password",  // optional
+    // Deprecated: Use Proxy.Username instead
+    ProxyUsername: "username",
+    // Deprecated: Use Proxy.Password instead
+    ProxyPassword: "password",
 }
 ```
 
@@ -34,10 +55,12 @@ The proxy settings support:
 - HTTP Basic authentication
 - Automatic retry (3 attempts) on proxy connection failures
 - Proper TLS/SSL negotiation through the proxy
+- Configurable timeouts for different phases of the connection
 
 ### Validation
 The client validates proxy configuration during initialization:
 - Proxy URL must be valid if provided
+- Proxy URL must not contain credentials (use separate username/password fields)
 - If authentication is used, both username and password must be provided
 
 ## Protocol
