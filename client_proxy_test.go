@@ -104,13 +104,12 @@ func basicAuth(username, password string) string {
 
 func TestClientOptions_Validate_ProxyConfig(t *testing.T) {
 	tests := []struct {
-		name           string
-		proxyURL       string
-		proxyUser      string
-		proxyPass      string
-		useDeprecated  bool
-		expectError    bool
-		errorMsg       string
+		name        string
+		proxyURL    string
+		proxyUser   string
+		proxyPass   string
+		expectError bool
+		errorMsg    string
 	}{
 		{
 			name:        "valid proxy URL",
@@ -152,20 +151,6 @@ func TestClientOptions_Validate_ProxyConfig(t *testing.T) {
 			expectError: true,
 			errorMsg:    "proxy URL must not contain credentials",
 		},
-		{
-			name:          "deprecated fields - valid proxy URL",
-			proxyURL:      "http://proxy.example.com:8080",
-			useDeprecated: true,
-			expectError:   false,
-		},
-		{
-			name:          "deprecated fields - with auth",
-			proxyURL:      "http://proxy.example.com:8080",
-			proxyUser:     "user",
-			proxyPass:     "pass",
-			useDeprecated: true,
-			expectError:   false,
-		},
 	}
 
 	for _, tt := range tests {
@@ -176,18 +161,11 @@ func TestClientOptions_Validate_ProxyConfig(t *testing.T) {
 					InstallationKey: "test-key",
 				},
 				Platform: "test",
-			}
-			
-			if tt.useDeprecated {
-				opts.ProxyURL = tt.proxyURL
-				opts.ProxyUsername = tt.proxyUser
-				opts.ProxyPassword = tt.proxyPass
-			} else {
-				opts.Proxy = ProxyOptions{
+				Proxy: ProxyOptions{
 					URL:      tt.proxyURL,
 					Username: tt.proxyUser,
 					Password: tt.proxyPass,
-				}
+				},
 			}
 
 			err := opts.Validate()
@@ -428,46 +406,3 @@ func TestProxyTimeoutConfiguration(t *testing.T) {
 	}
 }
 
-func TestBackwardCompatibility(t *testing.T) {
-	// Test that deprecated fields are properly migrated to new structure
-	opts := ClientOptions{
-		ProxyURL:      "http://proxy.example.com:8080",
-		ProxyUsername: "testuser",
-		ProxyPassword: "testpass",
-	}
-	opts.normalizeProxyConfig()
-
-	assert.Equal(t, "http://proxy.example.com:8080", opts.Proxy.URL)
-	assert.Equal(t, "testuser", opts.Proxy.Username)
-	assert.Equal(t, "testpass", opts.Proxy.Password)
-	
-	// Deprecated fields should be cleared
-	assert.Equal(t, "", opts.ProxyURL)
-	assert.Equal(t, "", opts.ProxyUsername)
-	assert.Equal(t, "", opts.ProxyPassword)
-}
-
-func TestMixedProxyConfiguration(t *testing.T) {
-	// Test that new config takes precedence over deprecated fields
-	opts := ClientOptions{
-		ProxyURL:      "http://old-proxy.example.com:8080",
-		ProxyUsername: "olduser",
-		ProxyPassword: "oldpass",
-		Proxy: ProxyOptions{
-			URL:      "http://new-proxy.example.com:8080",
-			Username: "newuser",
-			Password: "newpass",
-		},
-	}
-	opts.normalizeProxyConfig()
-
-	// New config should take precedence
-	assert.Equal(t, "http://new-proxy.example.com:8080", opts.Proxy.URL)
-	assert.Equal(t, "newuser", opts.Proxy.Username)
-	assert.Equal(t, "newpass", opts.Proxy.Password)
-	
-	// Deprecated fields should still be cleared
-	assert.Equal(t, "", opts.ProxyURL)
-	assert.Equal(t, "", opts.ProxyUsername)
-	assert.Equal(t, "", opts.ProxyPassword)
-}

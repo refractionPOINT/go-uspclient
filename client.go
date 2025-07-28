@@ -89,32 +89,9 @@ type ClientOptions struct {
 
 	// Proxy configuration for connecting to LimaCharlie cloud
 	Proxy ProxyOptions `json:"proxy,omitempty" yaml:"proxy,omitempty"`
-
-	// Deprecated: Use Proxy.URL instead
-	ProxyURL string `json:"proxy_url,omitempty" yaml:"proxy_url,omitempty"`
-	// Deprecated: Use Proxy.Username instead
-	ProxyUsername string `json:"proxy_username,omitempty" yaml:"proxy_username,omitempty"`
-	// Deprecated: Use Proxy.Password instead
-	ProxyPassword string `json:"proxy_password,omitempty" yaml:"proxy_password,omitempty"`
 }
 
 func (o *ClientOptions) normalizeProxyConfig() {
-	// Handle backward compatibility - migrate deprecated fields to new structure
-	if o.Proxy.URL == "" && o.ProxyURL != "" {
-		o.Proxy.URL = o.ProxyURL
-	}
-	if o.Proxy.Username == "" && o.ProxyUsername != "" {
-		o.Proxy.Username = o.ProxyUsername
-	}
-	if o.Proxy.Password == "" && o.ProxyPassword != "" {
-		o.Proxy.Password = o.ProxyPassword
-	}
-	
-	// Always clear deprecated fields after migration
-	o.ProxyURL = ""
-	o.ProxyUsername = ""
-	o.ProxyPassword = ""
-
 	// Set default timeouts if not specified
 	if o.Proxy.HandshakeTimeout == 0 {
 		o.Proxy.HandshakeTimeout = 45 * time.Second
@@ -139,13 +116,8 @@ func (o ClientOptions) Validate() error {
 	}
 
 	// Validate proxy configuration if provided
-	proxyURL := o.Proxy.URL
-	if proxyURL == "" {
-		proxyURL = o.ProxyURL // Check deprecated field too
-	}
-	
-	if proxyURL != "" {
-		parsedURL, err := url.Parse(proxyURL)
+	if o.Proxy.URL != "" {
+		parsedURL, err := url.Parse(o.Proxy.URL)
 		if err != nil {
 			return fmt.Errorf("invalid proxy URL: %v", err)
 		}
@@ -156,16 +128,7 @@ func (o ClientOptions) Validate() error {
 		}
 		
 		// Check authentication completeness
-		username := o.Proxy.Username
-		password := o.Proxy.Password
-		if username == "" {
-			username = o.ProxyUsername // Check deprecated field
-		}
-		if password == "" {
-			password = o.ProxyPassword // Check deprecated field
-		}
-		
-		if (username != "" && password == "") || (username == "" && password != "") {
+		if (o.Proxy.Username != "" && o.Proxy.Password == "") || (o.Proxy.Username == "" && o.Proxy.Password != "") {
 			return errors.New("proxy authentication requires both username and password")
 		}
 	}

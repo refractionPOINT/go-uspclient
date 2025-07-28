@@ -36,20 +36,6 @@ options := uspclient.ClientOptions{
 }
 ```
 
-For backward compatibility, the following deprecated fields are still supported:
-```go
-options := uspclient.ClientOptions{
-    // ... other options ...
-    
-    // Deprecated: Use Proxy.URL instead
-    ProxyURL:      "http://proxy.example.com:8080",
-    // Deprecated: Use Proxy.Username instead
-    ProxyUsername: "username",
-    // Deprecated: Use Proxy.Password instead
-    ProxyPassword: "password",
-}
-```
-
 The proxy settings support:
 - HTTP CONNECT tunneling for WebSocket connections
 - HTTP Basic authentication
