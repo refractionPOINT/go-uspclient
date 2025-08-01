@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"regexp"
 	"strconv"
+
+	"github.com/elastic/go-grok"
 )
 
 // Whenever a value references a "Path", it means the value is a
@@ -19,6 +21,9 @@ type MappingDescriptor struct {
 	// Use the named capture groups from the regular
 	// expression below to parse text lines into JSON.
 	ParsingRE string `json:"parsing_re,omitempty" yaml:"parsing_re,omitempty"`
+
+	// Grok patterns to parse events where 'message' is the root field.
+	ParsingGrok map[string]string `json:"parsing_grok,omitempty" yaml:"parsing_grok,omitempty"`
 
 	// Path to the component of the JSON events that
 	// indicates unique values to become Sensor IDs.
@@ -109,6 +114,12 @@ func (md *MappingDescriptor) UnmarshalJSON(data []byte) error {
 func (d MappingDescriptor) Validate() error {
 	if d.ParsingRE != "" {
 		if _, err := regexp.Compile(d.ParsingRE); err != nil {
+			return err
+		}
+	}
+	if len(d.ParsingGrok) > 0 {
+		g := grok.New()
+		if err := g.AddPatterns(d.ParsingGrok); err != nil {
 			return err
 		}
 	}
