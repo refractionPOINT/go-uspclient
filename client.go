@@ -6,6 +6,8 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	_ "embed"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +28,9 @@ import (
 
 	"github.com/google/uuid"
 )
+
+//go:embed certs/google_wr3.pem
+var certsGoogleWr3 []byte
 
 type Client struct {
 	options ClientOptions
@@ -55,12 +60,12 @@ type Identity struct {
 }
 
 type ProxyOptions struct {
-	URL               string        `json:"url,omitempty" yaml:"url,omitempty"`
-	Username          string        `json:"username,omitempty" yaml:"username,omitempty"`
-	Password          string        `json:"password,omitempty" yaml:"password,omitempty"`
-	HandshakeTimeout  time.Duration `json:"handshake_timeout,omitempty" yaml:"handshake_timeout,omitempty"`
-	ConnectTimeout    time.Duration `json:"connect_timeout,omitempty" yaml:"connect_timeout,omitempty"`
-	ReadWriteTimeout  time.Duration `json:"read_write_timeout,omitempty" yaml:"read_write_timeout,omitempty"`
+	URL              string        `json:"url,omitempty" yaml:"url,omitempty"`
+	Username         string        `json:"username,omitempty" yaml:"username,omitempty"`
+	Password         string        `json:"password,omitempty" yaml:"password,omitempty"`
+	HandshakeTimeout time.Duration `json:"handshake_timeout,omitempty" yaml:"handshake_timeout,omitempty"`
+	ConnectTimeout   time.Duration `json:"connect_timeout,omitempty" yaml:"connect_timeout,omitempty"`
+	ReadWriteTimeout time.Duration `json:"read_write_timeout,omitempty" yaml:"read_write_timeout,omitempty"`
 }
 
 type ClientOptions struct {
@@ -121,12 +126,12 @@ func (o ClientOptions) Validate() error {
 		if err != nil {
 			return fmt.Errorf("invalid proxy URL: %v", err)
 		}
-		
+
 		// Check if URL contains credentials
 		if parsedURL.User != nil {
 			return errors.New("proxy URL must not contain credentials - use proxy.username and proxy.password fields instead")
 		}
-		
+
 		// Check authentication completeness
 		if (o.Proxy.Username != "" && o.Proxy.Password == "") || (o.Proxy.Username == "" && o.Proxy.Password != "") {
 			return errors.New("proxy authentication requires both username and password")
@@ -158,7 +163,7 @@ var ErrorBufferFull = errors.New("buffer full")
 func NewClient(o ClientOptions) (*Client, error) {
 	// Normalize proxy configuration for backward compatibility
 	o.normalizeProxyConfig()
-	
+
 	if o.TestSinkMode {
 		return &Client{
 			options: o,
@@ -277,7 +282,7 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to connect to proxy: %v", err)
 			}
-			
+
 			// Ensure cleanup on error
 			defer func() {
 				if err != nil {
@@ -292,15 +297,15 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 
 			// Create HTTP CONNECT request using http.Request for better standards compliance
 			connectReq := &http.Request{
-				Method: "CONNECT",
-				URL:    &url.URL{Opaque: addr},
-				Host:   addr,
-				Header: make(http.Header),
-				Proto:  "HTTP/1.1",
+				Method:     "CONNECT",
+				URL:        &url.URL{Opaque: addr},
+				Host:       addr,
+				Header:     make(http.Header),
+				Proto:      "HTTP/1.1",
 				ProtoMajor: 1,
 				ProtoMinor: 1,
 			}
-			
+
 			// Add proxy authentication if provided
 			if c.options.Proxy.Username != "" && c.options.Proxy.Password != "" {
 				connectReq.Header.Set("Proxy-Authorization", connectReq.Header.Get("Authorization"))
@@ -311,7 +316,7 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 					connectReq.Header.Del("Authorization")
 				}
 			}
-			
+
 			// Write the CONNECT request
 			if err = connectReq.Write(proxyConn); err != nil {
 				return nil, fmt.Errorf("failed to send CONNECT request: %v", err)
@@ -345,8 +350,22 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 	targetURL, err := url.Parse(c.wssURL)
 	if err == nil && targetURL.Host != "" {
 		hostname := targetURL.Hostname()
+
+		// Create a custom certificate pool with the trusted intermediate certificate
+		certPool, err := x509.SystemCertPool()
+		if err != nil {
+			// If system cert pool is not available, create a new one
+			certPool = x509.NewCertPool()
+		}
+
+		// Add the trusted intermediate certificate
+		if !certPool.AppendCertsFromPEM(certsGoogleWr3) {
+			return nil, fmt.Errorf("failed to add google WR3 intermediate certificate")
+		}
+
 		dialer.TLSClientConfig = &tls.Config{
 			ServerName: hostname,
+			RootCAs:    certPool,
 		}
 	}
 
@@ -385,7 +404,7 @@ func (c *Client) connect() error {
 		if err == nil {
 			break
 		}
-		
+
 		if i < maxRetries-1 {
 			c.onWarning(fmt.Sprintf("Dial attempt %d failed: %v, retrying...", i+1, err))
 			time.Sleep(time.Duration(i+1) * time.Second) // Exponential backoff
