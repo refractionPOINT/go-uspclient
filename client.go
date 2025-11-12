@@ -164,6 +164,23 @@ func NewClient(o ClientOptions) (*Client, error) {
 	// Normalize proxy configuration for backward compatibility
 	o.normalizeProxyConfig()
 
+	// Validate mappings before anything else
+	for i, m := range o.Mappings {
+		if m.ParsingRE == "" && len(m.ParsingGrok) == 0 {
+			return nil, fmt.Errorf("mappings[%d].parsing_re or parsing_grok not set, one is required for multiple mappings", i)
+		}
+		if m.ParsingRE != "" {
+			if _, err := regexp.Compile(m.ParsingRE); err != nil {
+				return nil, fmt.Errorf("invalid mappings[%d].parsing_re: %v", i, err)
+			}
+		}
+	}
+	if o.Mapping.ParsingRE != "" {
+		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {
+			return nil, fmt.Errorf("invalid mapping.parsing_re: %v", err)
+		}
+	}
+
 	if o.TestSinkMode {
 		return &Client{
 			options: o,
@@ -194,20 +211,6 @@ func NewClient(o ClientOptions) (*Client, error) {
 
 	if o.Hostname == "" {
 		o.Hostname, _ = os.Hostname()
-	}
-
-	for i, m := range o.Mappings {
-		if m.ParsingRE == "" {
-			return nil, fmt.Errorf("mappings[%d].parsing_re not set, required for multiple mappings", i)
-		}
-		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {
-			return nil, fmt.Errorf("invalid mappings[%d].parsing_re: %v", i, err)
-		}
-	}
-	if o.Mapping.ParsingRE != "" {
-		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {
-			return nil, fmt.Errorf("invalid mapping.parsing_re: %v", err)
-		}
 	}
 
 	ab, err := NewAckBuffer(o.BufferOptions)

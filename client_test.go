@@ -270,3 +270,126 @@ func TestConnection(t *testing.T) {
 	srv.Close()
 	wg.Wait()
 }
+
+func TestMultipleMappingsValidation(t *testing.T) {
+	// Test multiple mappings with parsing_re - should work
+	t.Run("MultipleMappingsWithParsingRE", func(t *testing.T) {
+		_, err := NewClient(ClientOptions{
+			Identity: Identity{
+				Oid:             "test-oid",
+				InstallationKey: "test-key",
+			},
+			Platform:     "test",
+			TestSinkMode: true,
+			Mappings: []protocol.MappingDescriptor{
+				{
+					ParsingRE: `(?P<key>\w+)=(?P<value>\w+)`,
+				},
+				{
+					ParsingRE: `(?P<field>\w+):(?P<data>\w+)`,
+				},
+			},
+		})
+		if err != nil {
+			t.Errorf("expected multiple mappings with parsing_re to work, got error: %v", err)
+		}
+	})
+
+	// Test multiple mappings with parsing_grok - should work (bug fix verification)
+	t.Run("MultipleMappingsWithParsingGrok", func(t *testing.T) {
+		_, err := NewClient(ClientOptions{
+			Identity: Identity{
+				Oid:             "test-oid",
+				InstallationKey: "test-key",
+			},
+			Platform:     "test",
+			TestSinkMode: true,
+			Mappings: []protocol.MappingDescriptor{
+				{
+					ParsingGrok: map[string]string{
+						"message": "%{IP:clientip} %{WORD:verb}",
+					},
+				},
+				{
+					ParsingGrok: map[string]string{
+						"message": "%{NUMBER:id} %{WORD:status}",
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Errorf("expected multiple mappings with parsing_grok to work, got error: %v", err)
+		}
+	})
+
+	// Test mixed mappings (some RE, some Grok) - should work
+	t.Run("MixedMappings", func(t *testing.T) {
+		_, err := NewClient(ClientOptions{
+			Identity: Identity{
+				Oid:             "test-oid",
+				InstallationKey: "test-key",
+			},
+			Platform:     "test",
+			TestSinkMode: true,
+			Mappings: []protocol.MappingDescriptor{
+				{
+					ParsingRE: `(?P<key>\w+)=(?P<value>\w+)`,
+				},
+				{
+					ParsingGrok: map[string]string{
+						"message": "%{IP:clientip}",
+					},
+				},
+			},
+		})
+		if err != nil {
+			t.Errorf("expected mixed mappings to work, got error: %v", err)
+		}
+	})
+
+	// Test multiple mappings with neither RE nor Grok - should fail
+	t.Run("MultipleMappingsWithNeither", func(t *testing.T) {
+		_, err := NewClient(ClientOptions{
+			Identity: Identity{
+				Oid:             "test-oid",
+				InstallationKey: "test-key",
+			},
+			Platform:     "test",
+			TestSinkMode: true,
+			Mappings: []protocol.MappingDescriptor{
+				{
+					ParsingRE: `(?P<key>\w+)=(?P<value>\w+)`,
+				},
+				{
+					// Neither ParsingRE nor ParsingGrok set
+				},
+			},
+		})
+		if err == nil {
+			t.Error("expected error for mapping without parsing_re or parsing_grok, got nil")
+		}
+	})
+
+	// Test multiple mappings with invalid regex - should fail
+	t.Run("MultipleMappingsWithInvalidRE", func(t *testing.T) {
+		_, err := NewClient(ClientOptions{
+			Identity: Identity{
+				Oid:             "test-oid",
+				InstallationKey: "test-key",
+			},
+			Platform:     "test",
+			TestSinkMode: true,
+			Mappings: []protocol.MappingDescriptor{
+				{
+					ParsingRE: `(?P<key>\w+)=(?P<value>\w+)`,
+				},
+				{
+					ParsingRE: `[unclosed`,
+				},
+			},
+		})
+		if err == nil {
+			t.Error("expected error for invalid regex, got nil")
+		}
+	})
+}
