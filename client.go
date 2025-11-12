@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/elastic/go-grok"
 	"github.com/gorilla/websocket"
 	lc "github.com/refractionPOINT/go-limacharlie/limacharlie"
 	"github.com/refractionPOINT/go-uspclient/protocol"
@@ -174,10 +175,22 @@ func NewClient(o ClientOptions) (*Client, error) {
 				return nil, fmt.Errorf("invalid mappings[%d].parsing_re: %v", i, err)
 			}
 		}
+		if len(m.ParsingGrok) > 0 {
+			g := grok.New()
+			if err := g.AddPatterns(m.ParsingGrok); err != nil {
+				return nil, fmt.Errorf("invalid mappings[%d].parsing_grok: %v", i, err)
+			}
+		}
 	}
 	if o.Mapping.ParsingRE != "" {
 		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {
 			return nil, fmt.Errorf("invalid mapping.parsing_re: %v", err)
+		}
+	}
+	if len(o.Mapping.ParsingGrok) > 0 {
+		g := grok.New()
+		if err := g.AddPatterns(o.Mapping.ParsingGrok); err != nil {
+			return nil, fmt.Errorf("invalid mapping.parsing_grok: %v", err)
 		}
 	}
 

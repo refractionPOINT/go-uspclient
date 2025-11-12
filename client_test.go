@@ -392,4 +392,9 @@ func TestMultipleMappingsValidation(t *testing.T) {
 			t.Error("expected error for invalid regex, got nil")
 		}
 	})
+
+	// Note: go-grok's AddPatterns is quite lenient and doesn't validate much
+	// at pattern definition time. The actual validation happens when Compile()
+	// is called with a pattern to use. Since we can't easily predict which
+	// pattern will be used at runtime, we rely on runtime validation.
 }
