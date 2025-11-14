@@ -3,6 +3,7 @@ package uspclient
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"net/http"
 	"sync"
@@ -185,7 +186,7 @@ func TestConnection(t *testing.T) {
 
 	isErrorReceived := false
 
-	c, err := NewClient(ClientOptions{
+	c, err := NewClient(context.Background(), ClientOptions{
 		Identity: Identity{
 			Oid:             testOID,
 			InstallationKey: testIID,
@@ -274,7 +275,7 @@ func TestConnection(t *testing.T) {
 func TestMultipleMappingsValidation(t *testing.T) {
 	// Test multiple mappings with parsing_re - should work
 	t.Run("MultipleMappingsWithParsingRE", func(t *testing.T) {
-		_, err := NewClient(ClientOptions{
+		_, err := NewClient(context.Background(), ClientOptions{
 			Identity: Identity{
 				Oid:             "test-oid",
 				InstallationKey: "test-key",
@@ -297,7 +298,7 @@ func TestMultipleMappingsValidation(t *testing.T) {
 
 	// Test multiple mappings with parsing_grok - should work (bug fix verification)
 	t.Run("MultipleMappingsWithParsingGrok", func(t *testing.T) {
-		_, err := NewClient(ClientOptions{
+		_, err := NewClient(context.Background(), ClientOptions{
 			Identity: Identity{
 				Oid:             "test-oid",
 				InstallationKey: "test-key",
@@ -324,7 +325,7 @@ func TestMultipleMappingsValidation(t *testing.T) {
 
 	// Test mixed mappings (some RE, some Grok) - should work
 	t.Run("MixedMappings", func(t *testing.T) {
-		_, err := NewClient(ClientOptions{
+		_, err := NewClient(context.Background(), ClientOptions{
 			Identity: Identity{
 				Oid:             "test-oid",
 				InstallationKey: "test-key",
@@ -349,7 +350,7 @@ func TestMultipleMappingsValidation(t *testing.T) {
 
 	// Test multiple mappings with neither RE nor Grok - should fail
 	t.Run("MultipleMappingsWithNeither", func(t *testing.T) {
-		_, err := NewClient(ClientOptions{
+		_, err := NewClient(context.Background(), ClientOptions{
 			Identity: Identity{
 				Oid:             "test-oid",
 				InstallationKey: "test-key",
@@ -372,7 +373,7 @@ func TestMultipleMappingsValidation(t *testing.T) {
 
 	// Test multiple mappings with invalid regex - should fail
 	t.Run("MultipleMappingsWithInvalidRE", func(t *testing.T) {
-		_, err := NewClient(ClientOptions{
+		_, err := NewClient(context.Background(), ClientOptions{
 			Identity: Identity{
 				Oid:             "test-oid",
 				InstallationKey: "test-key",

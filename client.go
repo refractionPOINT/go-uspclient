@@ -161,7 +161,7 @@ func (o ClientOptions) Validate() error {
 
 var ErrorBufferFull = errors.New("buffer full")
 
-func NewClient(o ClientOptions) (*Client, error) {
+func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 	// Normalize proxy configuration for backward compatibility
 	o.normalizeProxyConfig()
 
@@ -211,8 +211,14 @@ func NewClient(o ClientOptions) (*Client, error) {
 	wssEndpoint := o.DestURL
 	if wssEndpoint == "" {
 		// Audo-detect, resolve the WSS URL for our datacenter.
+		// TODO: org.GetURLs() doesn't currently accept context, but the overall
+		// NewClient call will still respect the context timeout passed by the caller.
 		urls, err := org.GetURLs()
 		if err != nil {
+			// Check if context was cancelled/timed out
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("context cancelled during URL resolution: %w", ctx.Err())
+			}
 			return nil, err
 		}
 		u, ok := urls["lc_wss"]
