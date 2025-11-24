@@ -20,56 +20,56 @@ import (
 type MappingDescriptor struct {
 	// Use the named capture groups from the regular
 	// expression below to parse text lines into JSON.
-	ParsingRE string `json:"parsing_re,omitempty" yaml:"parsing_re,omitempty"`
+	ParsingRE string `json:"parsing_re,omitempty" yaml:"parsing_re,omitempty" msgpack:"parsing_re,omitempty"`
 
 	// Grok patterns to parse events where 'message' is the root field.
-	ParsingGrok map[string]string `json:"parsing_grok,omitempty" yaml:"parsing_grok,omitempty"`
+	ParsingGrok map[string]string `json:"parsing_grok,omitempty" yaml:"parsing_grok,omitempty" msgpack:"parsing_grok,omitempty"`
 
 	// Path to the component of the JSON events that
 	// indicates unique values to become Sensor IDs.
-	SensorKeyPath string `json:"sensor_key_path,omitempty" yaml:"sensor_key_path,omitempty"`
+	SensorKeyPath string `json:"sensor_key_path,omitempty" yaml:"sensor_key_path,omitempty" msgpack:"sensor_key_path,omitempty"`
 
 	// Path to the component of the JSON events that
 	// indicates the hostname of the sensor per the SensorKeyPath.
-	SensorHostnamePath string `json:"sensor_hostname_path,omitempty" yaml:"sensor_hostname_path,omitempty"`
+	SensorHostnamePath string `json:"sensor_hostname_path,omitempty" yaml:"sensor_hostname_path,omitempty" msgpack:"sensor_hostname_path,omitempty"`
 
 	// Path to the component that should be used as
 	// the Event Type of a specific event.
-	EventTypePath string `json:"event_type_path,omitempty" yaml:"event_type_path,omitempty"`
+	EventTypePath string `json:"event_type_path,omitempty" yaml:"event_type_path,omitempty" msgpack:"event_type_path,omitempty"`
 
 	// Path to the component that should be used as
 	// the Event Time (converted to a ms epoch).
-	EventTimePath string `json:"event_time_path,omitempty" yaml:"event_time_path,omitempty"`
+	EventTimePath string `json:"event_time_path,omitempty" yaml:"event_time_path,omitempty" msgpack:"event_time_path,omitempty"`
 
 	// Path to the component that should be used as
 	// the Investigation ID of a specific event.
-	InvestigationIDPath string `json:"investigation_id_path,omitempty" yaml:"investigation_id_path,omitempty"`
+	InvestigationIDPath string `json:"investigation_id_path,omitempty" yaml:"investigation_id_path,omitempty" msgpack:"investigation_id_path,omitempty"`
 
 	// Rename the fields in the Mappings but leave
 	// all other fields in place. The default behavior
 	// is to replace the final event with only the
 	// mapped values.
 	// Deprecated: field mappings are now deprecated in favor of transforms.
-	IsRenameOnly bool `json:"rename_only,omitempty" yaml:"rename_only,omitempty"`
+	IsRenameOnly bool `json:"rename_only,omitempty" yaml:"rename_only,omitempty" msgpack:"rename_only,omitempty"`
 	// Deprecated: field mappings are now deprecated in favor of transforms.
-	Mappings []FieldMapping `json:"mappings,omitempty" yaml:"mappings,omitempty"`
+	Mappings []FieldMapping `json:"mappings,omitempty" yaml:"mappings,omitempty" msgpack:"mappings,omitempty"`
 
 	// Transform applied to the events.
-	Transform map[string]interface{} `json:"transform,omitempty" yaml:"transform,omitempty"`
+	Transform map[string]interface{} `json:"transform,omitempty" yaml:"transform,omitempty" msgpack:"transform,omitempty"`
 
 	// List of field paths to drop upon ingestion.
-	DropFields []string `json:"drop_fields,omitempty" yaml:"drop_fields,omitempty"`
+	DropFields []string `json:"drop_fields,omitempty" yaml:"drop_fields,omitempty" msgpack:"drop_fields,omitempty"`
 
 	// Path to a field containing a Sensor ID that already exists whithin the tenant
 	// where the given event should be CCed to.
-	SensorIDReplicationPath string `json:"sid_replication_path,omitempty" yaml:"sid_replication_path,omitempty"`
+	SensorIDReplicationPath string `json:"sid_replication_path,omitempty" yaml:"sid_replication_path,omitempty" msgpack:"sid_replication_path,omitempty"`
 }
 
 // Deprecated: field mappings are now deprecated in favor of transforms.
 type FieldMapping struct {
 	// Map the source field to the destination field.
-	SourceField      string `json:"src_field" yaml:"src_field"`
-	DestinationField string `json:"dst_field" yaml:"dst_field"`
+	SourceField      string `json:"src_field" yaml:"src_field" msgpack:"src_field"`
+	DestinationField string `json:"dst_field" yaml:"dst_field" msgpack:"dst_field"`
 }
 
 // This custom JSON Unmarshaler permits the `IsRenameOnly` value to be
