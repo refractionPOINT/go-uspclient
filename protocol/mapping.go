@@ -118,8 +118,8 @@ func (d MappingDescriptor) Validate() error {
 		}
 	}
 	if len(d.ParsingGrok) > 0 {
-		g := grok.New()
-		if err := g.AddPatterns(d.ParsingGrok); err != nil {
+		// Use NewComplete to include all pattern sets (Syslog, Httpd, Firewalls, etc.)
+		if _, err := grok.NewComplete(d.ParsingGrok); err != nil {
 			return err
 		}
 	}
