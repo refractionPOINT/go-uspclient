@@ -15,8 +15,8 @@ const (
 )
 
 type AckBufferOptions struct {
-	OnBackPressure func() `json:"-" yaml:"-"`
-	OnAck          func() `json:"-" yaml:"-"`
+	OnBackPressure func() `json:"-" yaml:"-" msgpack:"-"`
+	OnAck          func() `json:"-" yaml:"-" msgpack:"-"`
 }
 
 type AckBuffer struct {

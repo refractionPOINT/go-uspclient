@@ -32,11 +32,11 @@ type DataMessage struct {
 }
 
 type ControlMessage struct {
-	Verb string `json:"v"`
+	Verb string `json:"v" msgpack:"v"`
 
 	// Optional components depending on verb.
-	SeqNum     uint64 `json:"x,omitempty"`
-	Duration   uint64 `json:"dur,omitempty"`
-	WindowSize uint64 `json:"win,omitempty"`
-	Error      string `json:"err,omitempty"`
+	SeqNum     uint64 `json:"x,omitempty" msgpack:"x,omitempty"`
+	Duration   uint64 `json:"dur,omitempty" msgpack:"dur,omitempty"`
+	WindowSize uint64 `json:"win,omitempty" msgpack:"win,omitempty"`
+	Error      string `json:"err,omitempty" msgpack:"err,omitempty"`
 }

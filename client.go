@@ -56,45 +56,45 @@ type Client struct {
 }
 
 type Identity struct {
-	Oid             string `json:"oid" yaml:"oid"`
-	InstallationKey string `json:"installation_key" yaml:"installation_key"`
+	Oid             string `json:"oid" yaml:"oid" msgpack:"oid"`
+	InstallationKey string `json:"installation_key" yaml:"installation_key" msgpack:"installation_key"`
 }
 
 type ProxyOptions struct {
-	URL              string        `json:"url,omitempty" yaml:"url,omitempty"`
-	Username         string        `json:"username,omitempty" yaml:"username,omitempty"`
-	Password         string        `json:"password,omitempty" yaml:"password,omitempty"`
-	HandshakeTimeout time.Duration `json:"handshake_timeout,omitempty" yaml:"handshake_timeout,omitempty"`
-	ConnectTimeout   time.Duration `json:"connect_timeout,omitempty" yaml:"connect_timeout,omitempty"`
-	ReadWriteTimeout time.Duration `json:"read_write_timeout,omitempty" yaml:"read_write_timeout,omitempty"`
+	URL              string        `json:"url,omitempty" yaml:"url,omitempty" msgpack:"url,omitempty"`
+	Username         string        `json:"username,omitempty" yaml:"username,omitempty" msgpack:"username,omitempty"`
+	Password         string        `json:"password,omitempty" yaml:"password,omitempty" msgpack:"password,omitempty"`
+	HandshakeTimeout time.Duration `json:"handshake_timeout,omitempty" yaml:"handshake_timeout,omitempty" msgpack:"handshake_timeout,omitempty"`
+	ConnectTimeout   time.Duration `json:"connect_timeout,omitempty" yaml:"connect_timeout,omitempty" msgpack:"connect_timeout,omitempty"`
+	ReadWriteTimeout time.Duration `json:"read_write_timeout,omitempty" yaml:"read_write_timeout,omitempty" msgpack:"read_write_timeout,omitempty"`
 }
 
 type ClientOptions struct {
-	Identity      Identity                     `json:"identity" yaml:"identity"`
-	Hostname      string                       `json:"hostname,omitempty" yaml:"hostname,omitempty"`
-	Platform      string                       `json:"platform,omitempty" yaml:"platform,omitempty"`
-	Architecture  string                       `json:"architecture,omitempty" yaml:"architecture,omitempty"`
-	Mapping       protocol.MappingDescriptor   `json:"mapping,omitempty" yaml:"mapping,omitempty"`
-	Mappings      []protocol.MappingDescriptor `json:"mappings,omitempty" yaml:"mappings,omitempty"`
-	Indexing      []protocol.IndexDescriptor   `json:"indexing,omitempty" yaml:"indexing,omitempty"`
-	BufferOptions AckBufferOptions             `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty"`
-	IsCompressed  bool                         `json:"is_compressed,omitempty" yaml:"is_compressed,omitempty"`
+	Identity      Identity                     `json:"identity" yaml:"identity" msgpack:"identity"`
+	Hostname      string                       `json:"hostname,omitempty" yaml:"hostname,omitempty" msgpack:"hostname,omitempty"`
+	Platform      string                       `json:"platform,omitempty" yaml:"platform,omitempty" msgpack:"platform,omitempty"`
+	Architecture  string                       `json:"architecture,omitempty" yaml:"architecture,omitempty" msgpack:"architecture,omitempty"`
+	Mapping       protocol.MappingDescriptor   `json:"mapping,omitempty" yaml:"mapping,omitempty" msgpack:"mapping,omitempty"`
+	Mappings      []protocol.MappingDescriptor `json:"mappings,omitempty" yaml:"mappings,omitempty" msgpack:"mappings,omitempty"`
+	Indexing      []protocol.IndexDescriptor   `json:"indexing,omitempty" yaml:"indexing,omitempty" msgpack:"indexing,omitempty"`
+	BufferOptions AckBufferOptions             `json:"buffer_options,omitempty" yaml:"buffer_options,omitempty" msgpack:"buffer_options,omitempty"`
+	IsCompressed  bool                         `json:"is_compressed,omitempty" yaml:"is_compressed,omitempty" msgpack:"is_compressed,omitempty"`
 
-	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key"`
+	SensorSeedKey string `json:"sensor_seed_key" yaml:"sensor_seed_key" msgpack:"sensor_seed_key"`
 
-	DebugLog  func(string) `json:"-" yaml:"-"`
-	OnError   func(error)  `json:"-" yaml:"-"`
-	OnWarning func(string) `json:"-" yaml:"-"`
+	DebugLog  func(string) `json:"-" yaml:"-" msgpack:"-"`
+	OnError   func(error)  `json:"-" yaml:"-" msgpack:"-"`
+	OnWarning func(string) `json:"-" yaml:"-" msgpack:"-"`
 
 	// Auto-detect if not specified (preferred).
-	DestURL string        `json:"dest_url,omitempty" yaml:"dest_url,omitempty"`
-	GenURL  func() string `json:"-" yaml:"-"`
+	DestURL string        `json:"dest_url,omitempty" yaml:"dest_url,omitempty" msgpack:"dest_url,omitempty"`
+	GenURL  func() string `json:"-" yaml:"-" msgpack:"-"`
 
 	// Simple flag to operate the client as a sink for testing.
-	TestSinkMode bool `json:"-" yaml:"-"`
+	TestSinkMode bool `json:"-" yaml:"-" msgpack:"-"`
 
 	// Proxy configuration for connecting to LimaCharlie cloud
-	Proxy ProxyOptions `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+	Proxy ProxyOptions `json:"proxy,omitempty" yaml:"proxy,omitempty" msgpack:"proxy,omitempty"`
 }
 
 func (o *ClientOptions) normalizeProxyConfig() {
