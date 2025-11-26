@@ -245,7 +245,7 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 		isStart: NewEvent(),
 	}
 	c.instanceID = uuid.NewString()
-	if err := c.connect(); err != nil {
+	if err := c.connect(ctx); err != nil {
 		return nil, err
 	}
 
@@ -394,7 +394,7 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 	return dialer, nil
 }
 
-func (c *Client) connect() error {
+func (c *Client) connect(ctx context.Context) error {
 	c.log("usp-client connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
@@ -422,14 +422,23 @@ func (c *Client) connect() error {
 	}
 
 	for i := 0; i < maxRetries; i++ {
-		conn, _, err = dialer.Dial(url, nil)
+		// Check if context is cancelled before attempting dial
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		conn, _, err = dialer.DialContext(ctx, url, nil)
 		if err == nil {
 			break
 		}
 
 		if i < maxRetries-1 {
 			c.onWarning(fmt.Sprintf("Dial attempt %d failed: %v, retrying...", i+1, err))
-			time.Sleep(time.Duration(i+1) * time.Second) // Exponential backoff
+			// Use select to allow context cancellation during backoff sleep
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(i+1) * time.Second):
+			}
 		}
 	}
 
@@ -462,8 +471,13 @@ func (c *Client) connect() error {
 		return err
 	}
 	// Wait for sink ready signal.
+	// Use context deadline if available, otherwise default to 25s timeout.
 	msg := protocol.ControlMessage{}
-	conn.SetReadDeadline(time.Now().Add(1 * time.Minute))
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetReadDeadline(deadline)
+	} else {
+		conn.SetReadDeadline(time.Now().Add(25 * time.Second))
+	}
 	if err := conn.ReadJSON(&msg); err != nil {
 		c.setLastError(err)
 		return err
@@ -545,7 +559,8 @@ func (c *Client) Reconnect() {
 
 		var err error
 		for {
-			err = c.connect()
+			// Use background context for runtime reconnections (should keep trying)
+			err = c.connect(context.Background())
 			if err != nil {
 				c.setLastError(err)
 				c.onWarning(fmt.Sprintf("error reconnecting: %v", err))
