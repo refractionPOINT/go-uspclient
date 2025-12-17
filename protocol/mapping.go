@@ -2,8 +2,10 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/elastic/go-grok"
 )
@@ -40,6 +42,11 @@ type MappingDescriptor struct {
 	// Path to the component that should be used as
 	// the Event Time (converted to a ms epoch).
 	EventTimePath string `json:"event_time_path,omitempty" yaml:"event_time_path,omitempty" msgpack:"event_time_path,omitempty"`
+
+	// Timezone to use when parsing timestamps that don't include timezone info.
+	// Uses IANA timezone names (e.g., "America/New_York", "Europe/London", "UTC").
+	// If not specified, timestamps without timezone info are treated as UTC.
+	EventTimeTimezone string `json:"event_time_timezone,omitempty" yaml:"event_time_timezone,omitempty" msgpack:"event_time_timezone,omitempty"`
 
 	// Path to the component that should be used as
 	// the Investigation ID of a specific event.
@@ -121,6 +128,11 @@ func (d MappingDescriptor) Validate() error {
 		// Use NewComplete to include all pattern sets (Syslog, Httpd, Firewalls, etc.)
 		if _, err := grok.NewComplete(d.ParsingGrok); err != nil {
 			return err
+		}
+	}
+	if d.EventTimeTimezone != "" {
+		if _, err := time.LoadLocation(d.EventTimeTimezone); err != nil {
+			return fmt.Errorf("invalid timezone %q: %w", d.EventTimeTimezone, err)
 		}
 	}
 	return nil
