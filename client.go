@@ -210,10 +210,9 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 	// Use the URL provided or auto-detect.
 	wssEndpoint := o.DestURL
 	if wssEndpoint == "" {
-		// Audo-detect, resolve the WSS URL for our datacenter.
-		// TODO: org.GetURLs() doesn't currently accept context, but the overall
-		// NewClient call will still respect the context timeout passed by the caller.
-		urls, err := org.GetURLs()
+		// Auto-detect the WSS URL for our datacenter. URL discovery uses the
+		// caller's context so initialization remains bounded during API retries.
+		urls, err := org.GetURLsWithContext(ctx)
 		if err != nil {
 			// Check if context was cancelled/timed out
 			if ctx.Err() != nil {
