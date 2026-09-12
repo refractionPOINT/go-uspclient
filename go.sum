@@ -93,6 +93,8 @@ github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20250606003539-fa83
 github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20250606003539-fa833c32796e/go.mod h1:I1F9eTY3lTm7JyrxT8UfEhe8Kq1dhASPBivb9ZT92+0=
 github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20260912224303-0cebec44ee51 h1:7F0VOHUpakD03MNOBmFSzvAQHn1V6tudVy4axgnn0Ko=
 github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20260912224303-0cebec44ee51/go.mod h1:u4Wgfxz8znmpDhmt6/Sd1pXu72YTk7AhsF3Gda6o7zs=
+github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20260912225634-498ee13693e3 h1:hPAzJHj+Rr57fNKGVT2eG4Tbq3ClnHGeOUksqcdPRAs=
+github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20260912225634-498ee13693e3/go.mod h1:u4Wgfxz8znmpDhmt6/Sd1pXu72YTk7AhsF3Gda6o7zs=
 github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0tI/otEQ=
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/rs/xid v1.6.0/go.mod h1:7XoLgs4eV+QndskICGsho+ADou8ySMSjJKDIan90Nz0=

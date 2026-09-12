@@ -6,7 +6,7 @@ require (
 	github.com/elastic/go-grok v0.3.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
-	github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20260912224303-0cebec44ee51
+	github.com/refractionPOINT/go-limacharlie/limacharlie v0.0.0-20260912225634-498ee13693e3
 	github.com/stretchr/testify v1.11.1
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 )
