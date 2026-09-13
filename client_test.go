@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -398,4 +399,24 @@ func TestMultipleMappingsValidation(t *testing.T) {
 	// at pattern definition time. The actual validation happens when Compile()
 	// is called with a pattern to use. Since we can't easily predict which
 	// pattern will be used at runtime, we rely on runtime validation.
+}
+
+func TestNewClientCancellationBoundsURLResolution(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	started := time.Now()
+	_, err := NewClient(ctx, ClientOptions{
+		Identity: Identity{
+			Oid:             "00000000-0000-0000-0000-000000000001",
+			InstallationKey: "test-key",
+		},
+		Platform: "test",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("URL resolution ignored cancellation for %s", elapsed)
+	}
 }
