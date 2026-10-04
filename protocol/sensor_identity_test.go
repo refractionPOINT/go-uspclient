@@ -56,3 +56,25 @@ func TestSensorIdentityMappingRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestSensorIdentityConnectionHeader(t *testing.T) {
+	// A mapping must survive the actual envelope sent by an on-prem adapter,
+	// including the multi-mapping spelling.
+	input := ConnectionHeader{Mapping: MappingDescriptor{SensorKeyPath: "actor", SensorIdentityType: "github_login"}, Mappings: []MappingDescriptor{{SensorKeyPath: "mailbox", SensorIdentityType: "email"}}}
+	for _, codec := range []struct {
+		marshal   func(any) ([]byte, error)
+		unmarshal func([]byte, any) error
+	}{{json.Marshal, json.Unmarshal}, {msgpack.Marshal, msgpack.Unmarshal}} {
+		data, err := codec.marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got ConnectionHeader
+		if err := codec.unmarshal(data, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.Mapping.SensorIdentityType != "github_login" || len(got.Mappings) != 1 || got.Mappings[0].SensorIdentityType != "email" {
+			t.Fatal("connection header dropped sensor identity")
+		}
+	}
+}
