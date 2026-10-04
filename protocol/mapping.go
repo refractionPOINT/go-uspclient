@@ -31,6 +31,10 @@ type MappingDescriptor struct {
 	// indicates unique values to become Sensor IDs.
 	SensorKeyPath string `json:"sensor_key_path,omitempty" yaml:"sensor_key_path,omitempty" msgpack:"sensor_key_path,omitempty"`
 
+	// Meaning of SensorKeyPath: email, username, github_login or device.
+	// Overrides the built-in declaration only when SensorKeyPath is set.
+	SensorIdentityType string `json:"sensor_identity_type,omitempty" yaml:"sensor_identity_type,omitempty" msgpack:"sensor_identity_type,omitempty"`
+
 	// Path to the component of the JSON events that
 	// indicates the hostname of the sensor per the SensorKeyPath.
 	SensorHostnamePath string `json:"sensor_hostname_path,omitempty" yaml:"sensor_hostname_path,omitempty" msgpack:"sensor_hostname_path,omitempty"`
@@ -119,6 +123,9 @@ func (md *MappingDescriptor) UnmarshalJSON(data []byte) error {
 }
 
 func (d MappingDescriptor) Validate() error {
+	if !ValidSensorIdentityType(d.SensorIdentityType) {
+		return fmt.Errorf("invalid sensor_identity_type")
+	}
 	if d.ParsingRE != "" {
 		if _, err := regexp.Compile(d.ParsingRE); err != nil {
 			return err
@@ -136,4 +143,15 @@ func (d MappingDescriptor) Validate() error {
 		}
 	}
 	return nil
+}
+
+// ValidSensorIdentityType validates the closed sensor identity vocabulary.
+// Empty preserves the built-in declaration.
+func ValidSensorIdentityType(t string) bool {
+	switch t {
+	case "", "email", "username", "github_login", "device":
+		return true
+	default:
+		return false
+	}
 }
