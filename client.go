@@ -165,6 +165,16 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 	// Normalize proxy configuration for backward compatibility
 	o.normalizeProxyConfig()
 
+	// Validate declarations even when callers construct clients without Validate.
+	if !protocol.ValidSensorIdentityType(o.Mapping.SensorIdentityType) {
+		return nil, errors.New("invalid mapping.sensor_identity_type")
+	}
+	for _, mapping := range o.Mappings {
+		if !protocol.ValidSensorIdentityType(mapping.SensorIdentityType) {
+			return nil, errors.New("invalid mappings.sensor_identity_type")
+		}
+	}
+
 	// Validate mappings before anything else
 	for i, m := range o.Mappings {
 		if m.ParsingRE == "" && len(m.ParsingGrok) == 0 {
