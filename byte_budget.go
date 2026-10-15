@@ -30,10 +30,12 @@ const (
 // or how fast any one of them is fed.
 //
 // Share one *ByteBudget between clients through AckBufferOptions.SharedBudget.
-// The budget is a soft cap in exactly one way: a client that currently holds
-// nothing is always allowed to admit one message, so a message larger than the
-// whole budget cannot deadlock its client. The worst-case overshoot is
-// therefore one message per client.
+// The budget is a soft cap in exactly one way: a client that holds no message
+// with an ack request pending (in particular one that holds nothing) is always
+// allowed to admit one message, flagged with AckRequested, so a message larger
+// than the whole budget cannot deadlock its client and no client ever waits for
+// room without an ack on its way. The worst-case overshoot is therefore one
+// message per client.
 //
 // A client's share is returned to the budget as its messages are acked and in
 // full when the client is closed, so always Close() clients that use one.
@@ -75,23 +77,28 @@ func (bb *ByteBudget) Used() uint64 {
 	return bb.used
 }
 
-// reserve tries to charge n bytes. force charges them even when over budget
-// (used for the one-message-minimum guarantee). When it fails it returns a
-// channel that is closed on the next release. The channel is obtained under
-// the same lock as the failed attempt, so a release that happens right after
-// the failure cannot be missed.
-func (bb *ByteBudget) reserve(n uint64, force bool) (bool, <-chan struct{}) {
+// reserve tries to charge n bytes. When force is set and they do not fit, they
+// are charged anyway and overshot is true (used for the one-message minimum
+// guarantee, see AckBuffer.tryAddLocked). used is the budget usage after the
+// call. When it fails it returns a channel that is closed on the next release;
+// the channel is obtained under the same lock as the failed attempt, so a
+// release that happens right after the failure cannot be missed.
+func (bb *ByteBudget) reserve(n uint64, force bool) (ok, overshot bool, used uint64, wake <-chan struct{}) {
 	bb.mu.Lock()
 	defer bb.mu.Unlock()
 	// Written as a subtraction so a huge n cannot overflow the comparison.
-	if force || bb.total == 0 || (n <= bb.total && bb.used <= bb.total-n) {
+	if bb.total == 0 || (n <= bb.total && bb.used <= bb.total-n) {
 		bb.used += n
-		return true, nil
+		return true, false, bb.used, nil
+	}
+	if force {
+		bb.used += n
+		return true, true, bb.used, nil
 	}
 	if bb.wake == nil {
 		bb.wake = make(chan struct{})
 	}
-	return false, bb.wake
+	return false, false, bb.used, bb.wake
 }
 
 // release returns n bytes and wakes everyone waiting for room.

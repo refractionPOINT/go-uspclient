@@ -792,11 +792,23 @@ func TestAckBufferConcurrentClose(t *testing.T) {
 
 	// Close the buffer
 	b.Close()
+	b.RLock()
+	seqAtClose := b.nextSeqNum
+	b.RUnlock()
 
 	// Signal goroutines to stop and wait for them: until they have exited a
 	// message they added just before Close may still be pending.
 	close(done)
 	wg.Wait()
+
+	// The point of the test: nothing is admitted once Close returned, even
+	// though the producers kept calling Add.
+	b.RLock()
+	seqAfter := b.nextSeqNum
+	b.RUnlock()
+	if seqAfter != seqAtClose {
+		t.Errorf("%d messages were admitted after Close", seqAfter-seqAtClose)
+	}
 
 	// Messages added before Close stay deliverable on purpose (Drain relies on
 	// it); once they are drained nothing more can come out.

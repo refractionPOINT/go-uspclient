@@ -487,21 +487,24 @@ func TestEstimateMessageSize(t *testing.T) {
 
 func TestByteBudgetReserveHugeRequestDoesNotOverflow(t *testing.T) {
 	pool := NewByteBudget(100)
-	if ok, wake := pool.reserve(^uint64(0), false); ok || wake == nil {
+	if ok, _, _, wake := pool.reserve(^uint64(0), false); ok || wake == nil {
 		t.Fatalf("a request larger than the pool must wait, got ok=%v wake=%v", ok, wake)
 	}
-	if ok, _ := pool.reserve(60, false); !ok {
+	if ok, _, _, _ := pool.reserve(60, false); !ok {
 		t.Fatal("60/100 must fit")
 	}
-	if ok, _ := pool.reserve(41, false); ok {
+	if ok, _, _, _ := pool.reserve(41, false); ok {
 		t.Fatal("101/100 must not fit")
+	}
+	if ok, overshot, _, _ := pool.reserve(500, true); !ok || !overshot {
+		t.Fatalf("a forced reserve must succeed and report the overshoot, got ok=%v overshot=%v", ok, overshot)
 	}
 	pool.release(1000) // over-release is clamped, never wraps
 	if pool.Used() != 0 {
 		t.Fatalf("used = %d, want 0", pool.Used())
 	}
 	unlimited := NewByteBudget(0)
-	if ok, _ := unlimited.reserve(1<<40, false); !ok {
+	if ok, _, _, _ := unlimited.reserve(1<<40, false); !ok {
 		t.Fatal("a zero-size budget means unlimited")
 	}
 }
@@ -582,4 +585,175 @@ func BenchmarkByteBudgetContended(b *testing.B) {
 			buf.Ack(n.SeqNum)
 		}
 	})
+}
+
+// heldFlagged reports whether the buffer holds an unacked message that carries
+// an ack request, and the highest such sequence number.
+func heldFlagged(t *testing.T, b *AckBuffer) (bool, uint64) {
+	t.Helper()
+	held, _ := b.GetUnAcked()
+	var seq uint64
+	for _, m := range held {
+		if m.AckRequested {
+			seq = m.SeqNum
+		}
+	}
+	return seq != 0, seq
+}
+
+// backendAck behaves like the backend: it only acknowledges messages that were
+// flagged with AckRequested (everything up to the highest flagged one that has
+// been delivered), never proactively.
+func backendAck(t *testing.T, b *AckBuffer) {
+	t.Helper()
+	var highest uint64
+	for {
+		m := b.GetNextToDeliver(0)
+		if m == nil {
+			break
+		}
+		if m.AckRequested {
+			highest = m.SeqNum
+		}
+	}
+	if highest != 0 {
+		if err := b.Ack(highest); err != nil {
+			t.Fatalf("Ack(%d): %v", highest, err)
+		}
+	}
+}
+
+// The count-based rule only asks for an ack every ackEvery messages (tens of
+// thousands with a big window), and the backend only acks on request. A client
+// that blocks on bytes long before that must already have a request in flight,
+// or it stalls until the backend's slow periodic ack. Property: whenever Add
+// gives up on bytes, the buffer holds a flagged message.
+func TestByteBudgetBlockedClientHasAckRequestPending(t *testing.T) {
+	const maxPayload = 300000
+	configs := []struct {
+		name  string
+		opts  func() []AckBufferOptions
+		nbufs int
+	}{
+		{"per-client cap", func() []AckBufferOptions {
+			return []AckBufferOptions{{MaxBytes: 1 << 20}}
+		}, 1},
+		{"shared pool", func() []AckBufferOptions {
+			pool := NewByteBudget(1 << 20)
+			return []AckBufferOptions{{SharedBudget: pool}, {SharedBudget: pool}, {SharedBudget: pool}}
+		}, 3},
+		{"both", func() []AckBufferOptions {
+			pool := NewByteBudget(1 << 20)
+			return []AckBufferOptions{{SharedBudget: pool, MaxBytes: 600000}, {SharedBudget: pool, MaxBytes: 600000}}
+		}, 2},
+	}
+	for _, cfg := range configs {
+		t.Run(cfg.name, func(t *testing.T) {
+			var bufs []*AckBuffer
+			for _, o := range cfg.opts() {
+				b := newBudgetBuffer(t, o)
+				b.UpdateCapacity(100000) // ackEvery = 50000: the count rule never fires here
+				bufs = append(bufs, b)
+			}
+			r := rand.New(rand.NewSource(1))
+			blocks := 0
+			for i := 0; i < 1200; i++ {
+				b := bufs[r.Intn(len(bufs))]
+				if b.Add(textMsg(1+r.Intn(maxPayload)), 5*time.Millisecond) {
+					if r.Intn(40) == 0 { // acks arrive sporadically
+						backendAck(t, b)
+					}
+					continue
+				}
+				blocks++
+				if ok, _ := heldFlagged(t, b); !ok {
+					t.Fatalf("iteration %d: Add blocked on bytes while the buffer holds no ack request", i)
+				}
+				// Every blocked client gets released by its own requested ack.
+				backendAck(t, b)
+			}
+			if blocks == 0 {
+				t.Fatal("the scenario never hit the byte limit, test proves nothing")
+			}
+		})
+	}
+}
+
+// A client that was admitted without a flag while the pool had room, and then
+// finds the pool filled by others, must still get a request in flight rather
+// than wait for the periodic ack.
+func TestByteBudgetUnflaggedTailGetsRequestWhenPoolFills(t *testing.T) {
+	pool := NewByteBudget(8 * testMsgSize)
+	a := newBudgetBuffer(t, AckBufferOptions{SharedBudget: pool})
+	other := newBudgetBuffer(t, AckBufferOptions{SharedBudget: pool})
+	a.UpdateCapacity(100000)
+	other.UpdateCapacity(100000)
+
+	if !a.Add(textMsg(testMsgPayload), time.Second) {
+		t.Fatal("setup")
+	}
+	if ok, _ := heldFlagged(t, a); ok {
+		t.Fatal("a message admitted into a mostly empty pool must not ask for an ack")
+	}
+	for i := 0; i < 7; i++ { // fill the pool from the other client
+		if !other.Add(textMsg(testMsgPayload), time.Second) {
+			t.Fatalf("other client message %d", i)
+		}
+	}
+
+	if !a.Add(textMsg(testMsgPayload), 100*time.Millisecond) {
+		t.Fatal("a client holding no ack request must be admitted (and flagged) even when the pool is full")
+	}
+	if ok, _ := heldFlagged(t, a); !ok {
+		t.Fatal("the forced message must carry AckRequested")
+	}
+	blocked := addAsync(a, textMsg(testMsgPayload), time.Hour)
+	expectBlocked(t, blocked, "client with an ack request pending")
+
+	backendAck(t, a)
+	expectResult(t, blocked, true, "after the requested ack")
+}
+
+// Under normal load (lots of room) the byte budget must not add ack traffic.
+func TestByteBudgetNoExtraAckRequestsWhenNotUnderPressure(t *testing.T) {
+	pool := NewByteBudget(1 << 30)
+	b := newBudgetBuffer(t, AckBufferOptions{SharedBudget: pool, MaxBytes: 1 << 29})
+	b.UpdateCapacity(100000)
+	for i := 0; i < 5000; i++ {
+		if !b.Add(textMsg(testMsgPayload), time.Second) {
+			t.Fatal("Add")
+		}
+	}
+	held, _ := b.GetUnAcked()
+	for _, m := range held {
+		if m.AckRequested {
+			t.Fatalf("message %d asked for an ack with the budget nearly empty", m.SeqNum)
+		}
+	}
+}
+
+// Under pressure the buffer asks for acks about every 1/16th of the limit, not
+// for every message: small messages must not turn into one ack per message.
+func TestByteBudgetPressureAckRequestsAreSparse(t *testing.T) {
+	const limit = 1 << 20
+	b := newBudgetBuffer(t, AckBufferOptions{MaxBytes: limit})
+	b.UpdateCapacity(100000)
+	added := 0
+	for b.Add(textMsg(100), 5*time.Millisecond) {
+		added++
+	}
+	held, _ := b.GetUnAcked()
+	flagged := 0
+	for _, m := range held {
+		if m.AckRequested {
+			flagged++
+		}
+	}
+	// Half the limit is calm, the other half asks about every limit/16.
+	if added < 2000 || flagged == 0 || flagged > 20 {
+		t.Fatalf("added %d small messages with %d ack requests, want thousands of messages and ~8 requests", added, flagged)
+	}
+	if ok, _ := heldFlagged(t, b); !ok {
+		t.Fatal("blocked without any ack request held")
+	}
 }

@@ -10,6 +10,10 @@ import (
 )
 
 const (
+	// pressureStepDivisor: under byte pressure, ask for an ack every
+	// 1/pressureStepDivisor of the limit admitted. See tryAddLocked.
+	pressureStepDivisor = 16
+
 	initialCapacity      = 1
 	ackPercentOfCapacity = 0.5
 )
@@ -62,6 +66,14 @@ type AckBuffer struct {
 	// bytes is what this buffer currently holds and has charged to the shared
 	// budget. It is zeroed (and returned to the budget) by Close.
 	bytes uint64
+
+	// lastFlaggedSeq is the sequence number of the most recent message that
+	// carries AckRequested (0 = none yet). Acks are cumulative, so a flagged
+	// message is still held iff lastFlaggedSeq >= firstSeqNum. See tryAddLocked.
+	lastFlaggedSeq uint64
+	// bytesSinceFlag is the estimated size admitted since the last message
+	// that carried AckRequested.
+	bytesSinceFlag uint64
 
 	// wake is closed (and nilled) whenever something a blocked Add may be
 	// waiting for changes: room freed by an ack, capacity change, Close.
@@ -140,9 +152,11 @@ func (b *AckBuffer) BufferedBytes() uint64 {
 // be exceeded. timeout == 0 waits until there is room or the buffer is closed.
 // It returns false on timeout or if the buffer is (or becomes) closed.
 //
-// A buffer that holds nothing always admits one message, even one larger than
-// the byte caps, so a single large message can never deadlock. The shared
-// budget can therefore be overshot by at most one message per client.
+// A buffer that holds no message with an ack request pending (in particular an
+// empty one) admits one message even if it exceeds the byte caps, and flags it
+// with AckRequested, so a single large message can never deadlock and a client
+// never waits on bytes without an ack already requested. The shared budget can
+// therefore be overshot by at most one message per client.
 func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 	if e == nil {
 		return false
@@ -211,24 +225,69 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 // budget is full it also returns a channel that is closed on the budget's next
 // release; the channel was obtained atomically with the failed reservation so
 // no release can be missed. Must hold the lock.
+//
+// Byte limits and ack requests. The backend only acknowledges messages that
+// carry AckRequested (plus a slow periodic ack), and the count-based rule sets
+// it only every ackEvery messages, which can be tens of thousands. A client
+// that blocks on bytes long before that would wait for the slow periodic ack.
+// Two rules prevent it:
+//
+//   - Guarantee: a client never blocks on bytes unless it holds an unacked
+//     message that carries AckRequested. If it holds none and the bytes would
+//     not fit, the message is admitted anyway (the same one-message overshoot
+//     as an empty buffer) and flagged, so the ack that unblocks the client is
+//     already on its way. The flag is only forced when the limit would
+//     actually have blocked, so there is no extra ack traffic otherwise.
+//   - Throughput: once a limit is at least half used, a message is flagged
+//     whenever 1/16th of that limit has been admitted since the last flag. A
+//     blocked client then has all but the last 1/16th of the limit covered by
+//     requests, so one ack releases nearly everything it holds, at a cost of
+//     about 16 requests per limit's worth of data (not one per message).
+//     Below the half-way point (steady state, plenty of room) no extra acks
+//     are asked.
 func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64) (bool, <-chan struct{}) {
 	if !b.isAvailable.IsSet() {
 		return false, nil
 	}
-	isEmpty := b.nextIndexFree == 0
-	if b.maxBytes != 0 && !isEmpty && b.bytes+size > b.maxBytes {
-		return false, nil
-	}
-	if b.shared != nil {
-		if ok, wake := b.shared.reserve(size, isEmpty); !ok {
-			return false, wake
+	forced := false
+	var pressureStep uint64
+	if b.accounting {
+		heldFlagged := b.lastFlaggedSeq != 0 && b.lastFlaggedSeq >= b.firstSeqNum
+		if b.maxBytes != 0 {
+			if b.bytes+size > b.maxBytes {
+				if heldFlagged {
+					return false, nil
+				}
+				forced = true
+			}
+			if 2*(b.bytes+size) >= b.maxBytes {
+				pressureStep = b.maxBytes / pressureStepDivisor
+			}
+		}
+		if b.shared != nil {
+			ok, overshot, used, wake := b.shared.reserve(size, !heldFlagged)
+			if !ok {
+				return false, wake
+			}
+			forced = forced || overshot
+			if total := b.shared.Total(); total != 0 && 2*used >= total {
+				if step := total / pressureStepDivisor; pressureStep == 0 || step < pressureStep {
+					pressureStep = step
+				}
+			}
 		}
 	}
 
 	e.SeqNum = b.nextSeqNum
 	b.nextSeqNum++
-	if e.SeqNum%b.ackEvery == 0 {
+	if e.SeqNum%b.ackEvery == 0 || forced || (pressureStep != 0 && b.bytesSinceFlag+size >= pressureStep) {
 		e.AckRequested = true
+	}
+	if e.AckRequested {
+		b.lastFlaggedSeq = e.SeqNum
+		b.bytesSinceFlag = 0
+	} else if b.accounting {
+		b.bytesSinceFlag += size
 	}
 	b.buff[b.nextIndexFree] = e
 	b.nextIndexFree++
