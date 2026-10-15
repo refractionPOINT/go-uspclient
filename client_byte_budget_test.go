@@ -142,16 +142,22 @@ func TestClientByteBudgetEndToEnd(t *testing.T) {
 		t.Fatalf("buffered=%d pool=%d, want %d", c.BufferedBytes(), pool.Used(), 3*testMsgSize)
 	}
 
+	expectDeliveries := func(n int, what string) {
+		t.Helper()
+		for i := 0; i < n; i++ {
+			select {
+			case <-srv.received:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("%s: only %d of %d deliveries seen", what, i, n)
+			}
+		}
+	}
+	expectDeliveries(3, "first delivery")
+
 	// Lose the connection: the three unacked messages are resent, not recounted.
 	srv.dropConnection()
 	waitFor(t, "reconnect", func() bool { return srv.connCount() == 2 })
-	for resent := 0; resent < 6; resent++ { // 3 originals + 3 resent
-		select {
-		case <-srv.received:
-		case <-time.After(10 * time.Second):
-			t.Fatalf("only %d deliveries seen, want 6", resent)
-		}
-	}
+	expectDeliveries(3, "resend after reconnect")
 	if c.BufferedBytes() != 3*testMsgSize || pool.Used() != 3*testMsgSize {
 		t.Fatalf("after reconnect buffered=%d pool=%d, want %d", c.BufferedBytes(), pool.Used(), 3*testMsgSize)
 	}
