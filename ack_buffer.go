@@ -17,6 +17,18 @@ const (
 type AckBufferOptions struct {
 	OnBackPressure func() `json:"-" yaml:"-" msgpack:"-"`
 	OnAck          func() `json:"-" yaml:"-" msgpack:"-"`
+
+	// MaxBytes caps the estimated in-memory size of the messages this buffer
+	// holds while they are waiting to be acknowledged. 0 means no per-client
+	// byte cap. Ship() blocks (like it does when the message-count window is
+	// full) until acks free enough room. See estimateMessageSize for how
+	// sizes are computed.
+	MaxBytes uint64 `json:"max_bytes,omitempty" yaml:"max_bytes,omitempty" msgpack:"max_bytes,omitempty"`
+
+	// SharedBudget is an optional process-wide byte budget that many clients
+	// draw from (see NewByteBudget). nil means no shared budget. It is never
+	// serialized: it only makes sense inside one process.
+	SharedBudget *ByteBudget `json:"-" yaml:"-" msgpack:"-"`
 }
 
 type AckBuffer struct {
@@ -39,6 +51,22 @@ type AckBuffer struct {
 
 	onBackPressure func()
 	onAck          func()
+
+	// Byte accounting. Only active when maxBytes != 0 or shared != nil, so
+	// that buffers without a byte budget pay nothing for it.
+	accounting bool
+	maxBytes   uint64
+	shared     *ByteBudget
+	// sizes[i] is the estimated size of buff[i]; len(sizes) == nextIndexFree.
+	sizes []uint64
+	// bytes is what this buffer currently holds and has charged to the shared
+	// budget. It is zeroed (and returned to the budget) by Close.
+	bytes uint64
+
+	// wake is closed (and nilled) whenever something a blocked Add may be
+	// waiting for changes: room freed by an ack, capacity change, Close.
+	// It is created lazily by the first Add that has to block.
+	wake chan struct{}
 }
 
 func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
@@ -54,6 +82,9 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 		currentCapacity:  initialCapacity,
 		onBackPressure:   o.OnBackPressure,
 		onAck:            o.OnAck,
+		maxBytes:         o.MaxBytes,
+		shared:           o.SharedBudget,
+		accounting:       o.MaxBytes != 0 || o.SharedBudget != nil,
 	}
 	b.isAvailable.Set()
 	b.isEmpty.Set()
@@ -65,75 +96,152 @@ func (b *AckBuffer) GetEmptyEvent() *Event {
 	return b.isEmpty
 }
 
+// Close stops the buffer from accepting new messages, wakes any Add call that
+// is blocked waiting for room (they return false) and returns the bytes it
+// holds to the shared budget, if any. Messages already in the buffer stay
+// available to GetUnAcked / GetNextToDeliver so they can still be drained or
+// handed back to the caller. It is safe to call more than once.
 func (b *AckBuffer) Close() {
 	b.Lock()
 	defer b.Unlock()
 	b.isRunning = false
+	b.releaseAllLocked()
+	b.signalLocked()
 }
 
+// signalLocked wakes every Add blocked on this buffer. Must hold the lock.
+func (b *AckBuffer) signalLocked() {
+	if b.wake != nil {
+		close(b.wake)
+		b.wake = nil
+	}
+}
+
+// releaseAllLocked returns everything this buffer has charged to the shared
+// budget. Must hold the lock.
+func (b *AckBuffer) releaseAllLocked() {
+	if b.bytes != 0 {
+		b.shared.release(b.bytes)
+		b.bytes = 0
+	}
+}
+
+// BufferedBytes returns the estimated size of the buffered, unacked messages.
+// It is only tracked when MaxBytes or SharedBudget is configured, otherwise it
+// is always 0. After Close it is 0.
+func (b *AckBuffer) BufferedBytes() uint64 {
+	b.RLock()
+	defer b.RUnlock()
+	return b.bytes
+}
+
+// Add queues a message, blocking while the buffer has no room: the
+// message-count window is full, or the per-client / shared byte budget would
+// be exceeded. timeout == 0 waits until there is room or the buffer is closed.
+// It returns false on timeout or if the buffer is (or becomes) closed.
+//
+// A buffer that holds nothing always admits one message, even one larger than
+// the byte caps, so a single large message can never deadlock. The shared
+// budget can therefore be overshot by at most one message per client.
 func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 	if e == nil {
 		return false
 	}
 
-	b.RLock()
-	isRunning := b.isRunning
-	b.RUnlock()
-	if !isRunning {
-		return false
+	var size uint64
+	if b.accounting {
+		size = estimateMessageSize(e)
 	}
 
-	hasBeenAdded := false
-	var deadline time.Time
+	var (
+		timer     *time.Timer
+		timerC    <-chan time.Time
+		deadlineC time.Time
+	)
 	if timeout != 0 {
-		deadline = time.Now().Add(timeout)
+		deadlineC = time.Now().Add(timeout)
+		defer func() {
+			if timer != nil {
+				timer.Stop()
+			}
+		}()
 	}
-	for !hasBeenAdded {
-		if !deadline.IsZero() {
-			now := time.Now()
-			if now.After(deadline) {
-				break
-			}
-			if b.onBackPressure != nil && !b.isAvailable.IsSet() {
-				b.onBackPressure()
-			}
-			if !b.isAvailable.WaitFor(deadline.Sub(now)) {
-				break
-			}
-		} else {
-			b.isAvailable.WaitFor(500 * time.Millisecond)
-		}
 
+	for {
 		b.Lock()
-		if !b.isAvailable.IsSet() {
-			isRunning := b.isRunning
+		if !b.isRunning {
 			b.Unlock()
-			if !isRunning {
+			return false
+		}
+		ok, poolWake := b.tryAddLocked(e, size)
+		if ok {
+			b.Unlock()
+			return true
+		}
+		if b.wake == nil {
+			b.wake = make(chan struct{})
+		}
+		localWake := b.wake
+		b.Unlock()
+
+		if !deadlineC.IsZero() {
+			remaining := time.Until(deadlineC)
+			if remaining <= 0 {
 				return false
 			}
-			if !deadline.IsZero() && time.Now().After(deadline) {
-				break
+			if b.onBackPressure != nil {
+				b.onBackPressure()
 			}
-			continue
+			if timer == nil {
+				timer = time.NewTimer(remaining)
+				timerC = timer.C
+			}
 		}
 
-		e.SeqNum = b.nextSeqNum
-		b.nextSeqNum++
-		if e.SeqNum%b.ackEvery == 0 {
-			e.AckRequested = true
+		select {
+		case <-localWake:
+		case <-poolWake: // nil (blocks forever) when not waiting on the pool
+		case <-timerC:
+			return false
 		}
-		b.buff[b.nextIndexFree] = e
-		b.nextIndexFree++
-		if b.nextIndexFree >= b.currentCapacity {
-			b.isAvailable.Clear()
+	}
+}
+
+// tryAddLocked admits e if there is room. When it fails because the shared
+// budget is full it also returns a channel that is closed on the budget's next
+// release; the channel was obtained atomically with the failed reservation so
+// no release can be missed. Must hold the lock.
+func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64) (bool, <-chan struct{}) {
+	if !b.isAvailable.IsSet() {
+		return false, nil
+	}
+	isEmpty := b.nextIndexFree == 0
+	if b.maxBytes != 0 && !isEmpty && b.bytes+size > b.maxBytes {
+		return false, nil
+	}
+	if b.shared != nil {
+		if ok, wake := b.shared.reserve(size, isEmpty); !ok {
+			return false, wake
 		}
-		hasBeenAdded = true
-		b.isReadyToDeliver.Set()
-		b.isEmpty.Clear()
-		b.Unlock()
 	}
 
-	return hasBeenAdded
+	e.SeqNum = b.nextSeqNum
+	b.nextSeqNum++
+	if e.SeqNum%b.ackEvery == 0 {
+		e.AckRequested = true
+	}
+	b.buff[b.nextIndexFree] = e
+	b.nextIndexFree++
+	if b.accounting {
+		b.sizes = append(b.sizes, size)
+		b.bytes += size
+	}
+	if b.nextIndexFree >= b.currentCapacity {
+		b.isAvailable.Clear()
+	}
+	b.isReadyToDeliver.Set()
+	b.isEmpty.Clear()
+	return true, nil
 }
 
 func (b *AckBuffer) Ack(seq uint64) error {
@@ -171,6 +279,19 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	}
 
 	b.firstSeqNum = seq + 1
+	if b.accounting {
+		var freed uint64
+		for _, sz := range b.sizes[:indexAcked+1] {
+			freed += sz
+		}
+		b.sizes = b.sizes[:copy(b.sizes, b.sizes[indexAcked+1:])]
+		// After Close the bytes were already returned: never release twice.
+		if freed > b.bytes {
+			freed = b.bytes
+		}
+		b.bytes -= freed
+		b.shared.release(freed)
+	}
 	for i := indexAcked + 1; i < uint64(len(b.buff)); i++ {
 		b.buff[i-indexAcked-1] = b.buff[i]
 	}
@@ -179,6 +300,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		b.buff[i] = nil
 	}
 	b.isAvailable.Set()
+	b.signalLocked()
 
 	// Adjust nextIndexToDeliver to account for removed messages
 	if b.nextIndexToDeliver > indexAcked+1 {
@@ -263,6 +385,7 @@ func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
 		}
 	}
 	b.currentCapacity = newCapacity
+	b.signalLocked()
 	b.ackEvery = uint64(float64(newCapacity) * ackPercentOfCapacity)
 	if b.ackEvery == 0 {
 		b.ackEvery = 1
