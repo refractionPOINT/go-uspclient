@@ -503,6 +503,10 @@ func (c *Client) connect(ctx context.Context) error {
 		return err
 	}
 	// Wait for sink ready signal.
+	// Closing the socket on cancellation unblocks the READY read below, so
+	// Close() (which waits on connMutex) does not sit out the whole timeout.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCloseOnCancel()
 	// Use context deadline if available, otherwise default to 25s timeout.
 	msg := protocol.ControlMessage{}
 	if deadline, ok := ctx.Deadline(); ok {
@@ -516,6 +520,12 @@ func (c *Client) connect(ctx context.Context) error {
 		conn.Close()
 		c.setLastError(err)
 		return err
+	}
+
+	// The context fired after the read returned: the socket was just closed.
+	if !stopCloseOnCancel() {
+		c.setLastError(ctx.Err())
+		return ctx.Err()
 	}
 
 	// We expect a READY control message to tell us

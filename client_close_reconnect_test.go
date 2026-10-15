@@ -248,3 +248,65 @@ func TestCloseFromOnErrorStopsReconnectLoop(t *testing.T) {
 		t.Fatalf("client closed from OnError reconnected anyway: %d connections, want 1", n)
 	}
 }
+
+// Close() waits for an in-flight connect(); it must not sit out the READY
+// timeout when the server is slow to answer.
+func TestCloseDoesNotWaitForSlowReady(t *testing.T) {
+	oldDelay := reconnectRetryDelay.Swap(int64(20 * time.Millisecond))
+	t.Cleanup(func() { reconnectRetryDelay.Store(oldDelay) })
+
+	var accepted atomic.Int32
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		hdr := protocol.ConnectionHeader{}
+		if err := conn.ReadJSON(&hdr); err != nil {
+			return
+		}
+		n := accepted.Add(1)
+		if n > 1 {
+			// Never answer READY on a reconnect.
+			<-release
+			return
+		}
+		conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageREADY})
+		conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageRECONNECT})
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(func() { close(release); srv.Close() })
+
+	c, err := NewClient(context.Background(), ClientOptions{
+		Identity:     Identity{Oid: uuid.NewString(), InstallationKey: "iid"},
+		DestURL:      "ws" + strings.TrimPrefix(srv.URL, "http") + "/usp",
+		Hostname:     "host",
+		Platform:     "text",
+		Architecture: "usp_adapter",
+	})
+	if err != nil {
+		t.Fatalf("NewClient(): %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for accepted.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("client never reconnected")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	done := make(chan struct{})
+	go func() { c.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() blocked on a reconnect waiting for READY")
+	}
+}
