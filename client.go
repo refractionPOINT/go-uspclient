@@ -652,6 +652,16 @@ func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) erro
 	return nil
 }
 
+// BufferedBytes returns the estimated size of the messages that were shipped
+// but not yet acknowledged. It is only tracked when BufferOptions.MaxBytes or
+// BufferOptions.SharedBudget is set, otherwise it is 0.
+func (c *Client) BufferedBytes() uint64 {
+	if c.ab == nil {
+		return 0
+	}
+	return c.ab.BufferedBytes()
+}
+
 func (c *Client) GetUnsent() ([]*protocol.DataMessage, error) {
 	if c.options.TestSinkMode {
 		return nil, nil
