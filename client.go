@@ -52,8 +52,21 @@ type Client struct {
 
 	instanceID string
 
-	isClosing bool
+	// Set by Close(). A reconnect loop must never outlive Close(), otherwise
+	// it keeps dialing forever and resurrects a connection nobody owns.
+	isClosing   atomic.Bool
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
 }
+
+// reconnectRetryDelay is how long a background reconnect waits between failed
+// attempts, in nanoseconds. Atomic so tests can shorten it while a reconnect
+// goroutine from an earlier test is still winding down.
+var reconnectRetryDelay atomic.Int64
+
+func init() { reconnectRetryDelay.Store(int64(5 * time.Second)) }
+
+var errClientClosing = errors.New("client is closing")
 
 type Identity struct {
 	Oid             string `json:"oid" yaml:"oid" msgpack:"oid"`
@@ -254,7 +267,9 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 		isStart: NewEvent(),
 	}
 	c.instanceID = uuid.NewString()
+	c.closeCtx, c.closeCancel = context.WithCancel(context.Background())
 	if err := c.connect(ctx); err != nil {
+		c.closeCancel()
 		return nil, err
 	}
 
@@ -278,7 +293,12 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 		return nil, nil
 	}
 	c.log("usp-client closing")
-	c.isClosing = true
+	// Stop any background reconnect loop first: it holds no lock while it
+	// sleeps between attempts, so disconnect() below cannot see it.
+	c.isClosing.Store(true)
+	if c.closeCancel != nil {
+		c.closeCancel()
+	}
 	c.ab.Close()
 	err1 := c.disconnect()
 	messages, err2 := c.ab.GetUnAcked()
@@ -407,6 +427,9 @@ func (c *Client) connect(ctx context.Context) error {
 	c.log("usp-client connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
+	if c.isClosing.Load() {
+		return errClientClosing
+	}
 	c.isStart.Clear()
 
 	// Connect the websocket.
@@ -480,6 +503,10 @@ func (c *Client) connect(ctx context.Context) error {
 		return err
 	}
 	// Wait for sink ready signal.
+	// Closing the socket on cancellation unblocks the READY read below, so
+	// Close() (which waits on connMutex) does not sit out the whole timeout.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCloseOnCancel()
 	// Use context deadline if available, otherwise default to 25s timeout.
 	msg := protocol.ControlMessage{}
 	if deadline, ok := ctx.Deadline(); ok {
@@ -488,15 +515,35 @@ func (c *Client) connect(ctx context.Context) error {
 		conn.SetReadDeadline(time.Now().Add(25 * time.Second))
 	}
 	if err := conn.ReadJSON(&msg); err != nil {
+		// Nobody else owns this socket: close it or it stays open (and
+		// counted by the server) until the garbage collector finds it.
+		conn.Close()
 		c.setLastError(err)
 		return err
+	}
+
+	// The context fired after the read returned: the socket was just closed.
+	if !stopCloseOnCancel() {
+		c.setLastError(ctx.Err())
+		return ctx.Err()
 	}
 
 	// We expect a READY control message to tell us
 	// we're good to go. If not, abort.
 	if err := c.processControlMessage(msg); err != nil {
+		conn.Close()
 		c.setLastError(err)
 		return err
+	}
+
+	// Close() may have run while we were connecting (it only waits for us at
+	// disconnect()). Starting the workers now would resurrect a client that
+	// was just closed, and clearing isStop would keep disconnect() waiting on
+	// them forever.
+	if c.isClosing.Load() {
+		conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
+		conn.Close()
+		return errClientClosing
 	}
 
 	c.isStop.Clear()
@@ -544,7 +591,7 @@ func (c *Client) Reconnect() {
 	if c.options.TestSinkMode {
 		return
 	}
-	if c.isClosing {
+	if c.isClosing.Load() {
 		// If we're actually closing ignore
 		// requests for reconnecting.
 		return
@@ -566,20 +613,31 @@ func (c *Client) Reconnect() {
 		// We assume that anything that was not ACKed should be resent
 		c.ab.ResetDelivery()
 
-		var err error
-		for {
-			// Use background context for runtime reconnections (should keep trying)
-			err = c.connect(context.Background())
-			if err != nil {
-				c.setLastError(err)
-				c.onWarning(fmt.Sprintf("error reconnecting: %v", err))
-				time.Sleep(5 * time.Second)
-				continue
-			}
-			break
+		defer atomic.StoreUint32(&c.isReconnecting, 0)
+
+		// Clients not built by NewClient have no close context.
+		closeCtx := c.closeCtx
+		if closeCtx == nil {
+			closeCtx = context.Background()
 		}
 
-		atomic.StoreUint32(&c.isReconnecting, 0)
+		for {
+			// Keep trying until connected, but only until Close() is called.
+			err := c.connect(closeCtx)
+			if err == nil {
+				return
+			}
+			if c.isClosing.Load() {
+				return
+			}
+			c.setLastError(err)
+			c.onWarning(fmt.Sprintf("error reconnecting: %v", err))
+			select {
+			case <-closeCtx.Done():
+				return
+			case <-time.After(time.Duration(reconnectRetryDelay.Load())):
+			}
+		}
 	}()
 }
 
