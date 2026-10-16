@@ -237,3 +237,36 @@ func TestDrainRequestsAckForQueuedTail(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBeginDrainWakesProducerWithoutLosingAcceptedData(t *testing.T) {
+	pool := NewByteBudget(testMsgSize)
+	c, srv := drainClient(t, pool)
+	if err := c.Ship(textMsg(testMsgPayload), time.Second); err != nil {
+		t.Fatal(err)
+	}
+	receiveSeq(t, srv, 1)
+	blocked := make(chan error, 1)
+	go func() { blocked <- c.Ship(textMsg(testMsgPayload), 0) }()
+	c.BeginDrain()
+	select {
+	case err := <-blocked:
+		if !errors.Is(err, ErrorClosed) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("BeginDrain did not wake producer")
+	}
+	if pool.Used() != testMsgSize {
+		t.Fatal("BeginDrain released retained bytes")
+	}
+	done := make(chan error, 1)
+	go func() { done <- c.Drain(time.Second) }()
+	drainStillWaiting(t, done)
+	srv.ack(t, 1)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if n, err := c.Close(); len(n) != 0 || err != nil {
+		t.Fatalf("Close=%d,%v", len(n), err)
+	}
+}

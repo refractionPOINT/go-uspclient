@@ -288,6 +288,19 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 	return c, nil
 }
 
+// BeginDrain stops accepting new messages and wakes blocked Ship calls without
+// waiting for acknowledgements. Shutdown code can call it before joining producer
+// goroutines, then call Drain to confirm accepted data and Close to free resources.
+func (c *Client) BeginDrain() {
+	if c.ab == nil {
+		return
+	}
+	c.ab.Lock()
+	c.ab.isRunning = false
+	c.ab.signalLocked()
+	c.ab.Unlock()
+}
+
 // Drain stops accepting messages and waits for every buffered message to be
 // acknowledged by the proxy. A successful socket write alone is not confirmation.
 // On timeout the error includes the remaining count and sequence range; Close
