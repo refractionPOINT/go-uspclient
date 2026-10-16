@@ -63,25 +63,22 @@ func (e *Event) WaitFor(d time.Duration) bool {
 	e.waiters = append(e.waiters, w)
 	e.m.Unlock()
 
-	timeout := make(chan bool, 1)
-	go func() {
-		time.Sleep(d)
-		timeout <- true
-		close(timeout)
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	defer func() {
 		e.m.Lock()
+		defer e.m.Unlock()
 		for i, t := range e.waiters {
 			if t == w {
 				e.waiters = removeWaiter(e.waiters, i)
 				break
 			}
 		}
-		e.m.Unlock()
 	}()
-
 	select {
 	case <-w:
 		return true
-	case <-timeout:
+	case <-timer.C:
 		return false
 	}
 }
