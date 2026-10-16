@@ -799,7 +799,7 @@ func (c *Client) sender() {
 			if backoffSec > uint64((24*time.Hour)/time.Second) {
 				backoffSec = uint64((24 * time.Hour) / time.Second)
 			}
-			if c.isStop.WaitFor(time.Duration(backoffSec) * time.Second) {
+			if c.waitBackoff(time.Duration(backoffSec) * time.Second) {
 				return
 			}
 		}
@@ -842,6 +842,23 @@ func (c *Client) sender() {
 			c.Reconnect()
 			return
 		}
+	}
+}
+
+// Reconnect preserves the proxy's throttle interval, while Close must be able
+// to interrupt it even when disconnect is already waiting on the sender.
+func (c *Client) waitBackoff(d time.Duration) bool {
+	var closing <-chan struct{}
+	if c.closeCtx != nil {
+		closing = c.closeCtx.Done()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-closing:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
