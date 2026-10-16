@@ -172,7 +172,19 @@ func (o ClientOptions) Validate() error {
 	return nil
 }
 
+// ErrorBufferFull is returned by Ship when there was no room in the buffer
+// within the timeout.
 var ErrorBufferFull = errors.New("buffer full")
+
+// ErrorClosed is returned by Ship when the client is closed, or is closed while
+// Ship is waiting for room. It is a clean shutdown, not a failure: retrying is
+// pointless and it should not be reported as an error.
+//
+// Before this error existed, Ship returned ErrorBufferFull in that case. Code
+// that retries on ErrorBufferFull no longer retries a closed client (good), but
+// code that treats every other error as fatal now sees ErrorClosed there and
+// should check for it first.
+var ErrorClosed = errors.New("client closed")
 
 func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 	// Normalize proxy configuration for backward compatibility
@@ -641,15 +653,15 @@ func (c *Client) Reconnect() {
 	}()
 }
 
+// Ship queues a message for delivery, waiting up to timeout (0 = until there is
+// room or the client is closed) for room in the buffer. It returns
+// ErrorBufferFull if there was no room in time and ErrorClosed if the client is
+// closed or gets closed while waiting.
 func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) error {
 	if c.options.TestSinkMode {
 		return nil
 	}
-	if !c.ab.Add(message, timeout) {
-		return ErrorBufferFull
-	}
-
-	return nil
+	return c.ab.add(message, timeout)
 }
 
 // BufferedBytes returns the estimated size of the messages that were shipped

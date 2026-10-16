@@ -868,3 +868,51 @@ func TestAckBufferResetDeliveryWithAcks(t *testing.T) {
 		t.Errorf("should be able to ack message 3 after ResetDelivery, but got error: %v", err)
 	}
 }
+
+// A failed Add must say why: a timeout (the caller may retry) is not the same
+// as a closed buffer (retrying is pointless, and it is not a failure).
+func TestAckBufferAddErrors(t *testing.T) {
+	newFull := func(t *testing.T) *AckBuffer {
+		b, _ := NewAckBuffer(AckBufferOptions{}) // window of 1
+		if err := b.add(&protocol.DataMessage{}, time.Second); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	b := newFull(t)
+	if err := b.add(&protocol.DataMessage{}, 50*time.Millisecond); err != ErrorBufferFull {
+		t.Fatalf("full buffer, short timeout: got %v, want ErrorBufferFull", err)
+	}
+	if err := b.add(nil, time.Second); err != ErrorBufferFull {
+		t.Fatalf("nil message: got %v, want ErrorBufferFull", err)
+	}
+
+	for _, timeout := range []time.Duration{0, time.Hour} {
+		b := newFull(t)
+		res := make(chan error, 1)
+		go func() { res <- b.add(&protocol.DataMessage{}, timeout) }()
+		select {
+		case err := <-res:
+			t.Fatalf("timeout %v: returned %v while the buffer was full and open", timeout, err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		b.Close()
+		select {
+		case err := <-res:
+			if err != ErrorClosed {
+				t.Fatalf("timeout %v, closed while waiting: got %v, want ErrorClosed", timeout, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("timeout %v: Close did not wake the waiting Add", timeout)
+		}
+		for _, again := range []time.Duration{0, time.Second} {
+			if err := b.add(&protocol.DataMessage{}, again); err != ErrorClosed {
+				t.Fatalf("already closed buffer (timeout %v): got %v, want ErrorClosed", again, err)
+			}
+		}
+		if b.Add(&protocol.DataMessage{}, time.Second) {
+			t.Fatal("Add on a closed buffer must keep returning false")
+		}
+	}
+}

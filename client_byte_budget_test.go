@@ -336,3 +336,73 @@ func TestClientByteBudgetNoAckTrafficWithoutPressure(t *testing.T) {
 		t.Fatalf("%d ack requests with the budget nearly empty, want 0", acks)
 	}
 }
+
+// Ship tells a closed client from a full buffer: a graceful teardown that wakes
+// a blocked Ship must not look like a failure to the caller.
+func TestClientShipReportsClosedNotBufferFull(t *testing.T) {
+	cases := []struct {
+		name string
+		opts func() AckBufferOptions
+	}{
+		{"per-client cap", func() AckBufferOptions { return AckBufferOptions{MaxBytes: testMsgSize} }},
+		{"shared pool", func() AckBufferOptions { return AckBufferOptions{SharedBudget: NewByteBudget(testMsgSize)} }},
+		{"count window", func() AckBufferOptions { return AckBufferOptions{} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newAckDrivenServer(t) // acks nothing until told to
+			c, err := NewClient(context.Background(), ClientOptions{
+				Identity:      Identity{Oid: uuid.NewString(), InstallationKey: "iid"},
+				DestURL:       srv.url(),
+				Hostname:      "host",
+				Platform:      "text",
+				Architecture:  "usp_adapter",
+				BufferOptions: tc.opts(),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { c.Close() })
+			waitFor(t, "FLOW window", func() bool { return c.ab.GetCurrentCapacity() == 1000 })
+			if tc.name == "count window" {
+				c.ab.UpdateCapacity(1) // one message fills it
+			}
+
+			// Fill whatever limit this case has (a few forced messages at most).
+			for i := 0; ; i++ {
+				if err := c.Ship(textMsg(testMsgPayload), 150*time.Millisecond); err != nil {
+					if err != ErrorBufferFull {
+						t.Fatalf("a real timeout must be ErrorBufferFull, got %v", err)
+					}
+					break
+				}
+				if i > 10 {
+					t.Fatal("the buffer never filled")
+				}
+			}
+
+			res := make(chan error, 1)
+			go func() { res <- c.Ship(textMsg(testMsgPayload), time.Hour) }()
+			select {
+			case err := <-res:
+				t.Fatalf("Ship returned %v while the buffer was full", err)
+			case <-time.After(150 * time.Millisecond):
+			}
+			c.Close()
+			select {
+			case err := <-res:
+				if err != ErrorClosed {
+					t.Fatalf("Ship woken by Close returned %v, want ErrorClosed", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("Close did not wake the blocked Ship")
+			}
+			if err := c.Ship(textMsg(1), time.Second); err != ErrorClosed {
+				t.Fatalf("Ship after Close returned %v, want ErrorClosed", err)
+			}
+			if err := c.Ship(textMsg(1), 0); err != ErrorClosed {
+				t.Fatalf("Ship(timeout 0) after Close returned %v, want ErrorClosed", err)
+			}
+		})
+	}
+}
