@@ -1,6 +1,7 @@
 package uspclient
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"sync"
@@ -38,6 +39,7 @@ type AckBufferOptions struct {
 type AckBuffer struct {
 	sync.RWMutex
 
+	isClosed    bool
 	isRunning   bool
 	isAvailable *Event
 
@@ -117,8 +119,44 @@ func (b *AckBuffer) Close() {
 	b.Lock()
 	defer b.Unlock()
 	b.isRunning = false
+	b.isClosed = true
 	b.releaseAllLocked()
 	b.signalLocked()
+}
+
+// drain seals admission without returning bytes to the shared pool: retained
+// messages still consume memory until an ACK or Close. The wake channel is
+// sampled under the same lock as the pending count, so no final ACK is missed.
+func (b *AckBuffer) drain(ctx context.Context) error {
+	b.Lock()
+	b.isRunning = false
+	b.signalLocked()
+	for {
+		if b.nextIndexFree == 0 {
+			b.Unlock()
+			return nil
+		}
+		err := ctx.Err()
+		if b.isClosed {
+			err = ErrorClosed
+		}
+		if err != nil {
+			e := &DrainError{Unacked: int(b.nextIndexFree), FirstSeq: b.buff[0].SeqNum,
+				LastSeq: b.buff[b.nextIndexFree-1].SeqNum, Err: err}
+			b.Unlock()
+			return e
+		}
+		if b.wake == nil {
+			b.wake = make(chan struct{})
+		}
+		wake := b.wake
+		b.Unlock()
+		select {
+		case <-wake:
+		case <-ctx.Done():
+		}
+		b.Lock()
+	}
 }
 
 // signalLocked wakes every Add blocked on this buffer. Must hold the lock.
@@ -411,6 +449,14 @@ func (b *AckBuffer) GetNextToDeliver(timeout time.Duration) *protocol.DataMessag
 		return nil
 	}
 	n := b.buff[b.nextIndexToDeliver]
+	if !b.isRunning && b.nextIndexToDeliver+1 == b.nextIndexFree {
+		// Do not mutate the retained message while a sender may encode it.
+		// Cumulative ACKs need one extra request, on the final queued frame.
+		// Already transmitted tails are confirmed by the proxy's periodic ACK.
+		copy := *n
+		copy.AckRequested = true
+		n = &copy
+	}
 	b.nextIndexToDeliver++
 	if b.nextIndexToDeliver >= b.nextIndexFree {
 		b.isReadyToDeliver.Clear()

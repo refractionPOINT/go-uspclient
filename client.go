@@ -288,17 +288,59 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 	return c, nil
 }
 
+// BeginDrain stops accepting new messages and wakes blocked Ship calls without
+// waiting for acknowledgements. Shutdown code can call it before joining producer
+// goroutines, then call Drain to confirm accepted data and Close to free resources.
+func (c *Client) BeginDrain() {
+	if c.ab == nil {
+		return
+	}
+	c.ab.Lock()
+	c.ab.isRunning = false
+	c.ab.signalLocked()
+	c.ab.Unlock()
+}
+
+// Drain stops accepting messages and waits for every buffered message to be
+// acknowledged by the proxy. A successful socket write alone is not confirmation.
+// On timeout the error includes the remaining count and sequence range; Close
+// returns those messages for recovery. The client must still be closed afterwards.
 func (c *Client) Drain(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return c.DrainContext(ctx)
+}
+
+// DrainContext is Drain with cancellation. Contexts without a deadline are capped
+// at one minute so an unavailable or throttling proxy cannot hang shutdown.
+// Reconnects continue while draining and resend unacknowledged messages.
+func (c *Client) DrainContext(ctx context.Context) error {
 	if c.options.TestSinkMode {
 		return nil
 	}
-	c.log("usp-client draining")
-	c.ab.Close()
-	if !c.ab.GetEmptyEvent().WaitFor(timeout) {
-		return errors.New("timeout draining")
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Minute)
+		defer cancel()
 	}
-	return nil
+	c.log("usp-client draining")
+	return c.ab.drain(ctx)
 }
+
+// DrainError reports the messages still awaiting acknowledgement when Drain
+// stops. Close returns their payloads. Unwrap supports errors.Is with the context
+// cancellation/deadline error or ErrorClosed.
+type DrainError struct {
+	Unacked           int
+	FirstSeq, LastSeq uint64
+	Err               error
+}
+
+func (e *DrainError) Error() string {
+	return fmt.Sprintf("draining: %d unacknowledged messages (sequences %d..%d): %v", e.Unacked, e.FirstSeq, e.LastSeq, e.Err)
+}
+
+func (e *DrainError) Unwrap() error { return e.Err }
 
 func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	if c.options.TestSinkMode {
@@ -752,7 +794,14 @@ func (c *Client) sender() {
 				break
 			}
 			c.log(fmt.Sprintf("backing off %d seconds", backoffSec))
-			time.Sleep(time.Duration(backoffSec) * time.Second)
+			// Stop must interrupt even a very long server throttle.
+			// Cap before converting to Duration to avoid integer overflow.
+			if backoffSec > uint64((24*time.Hour)/time.Second) {
+				backoffSec = uint64((24 * time.Hour) / time.Second)
+			}
+			if c.waitBackoff(time.Duration(backoffSec) * time.Second) {
+				return
+			}
 		}
 		// Wait for a bit for messages to arrive.
 		message := c.ab.GetNextToDeliver(500 * time.Millisecond)
@@ -793,6 +842,23 @@ func (c *Client) sender() {
 			c.Reconnect()
 			return
 		}
+	}
+}
+
+// Reconnect preserves the proxy's throttle interval, while Close must be able
+// to interrupt it even when disconnect is already waiting on the sender.
+func (c *Client) waitBackoff(d time.Duration) bool {
+	var closing <-chan struct{}
+	if c.closeCtx != nil {
+		closing = c.closeCtx.Done()
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-closing:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
