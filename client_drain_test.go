@@ -270,3 +270,40 @@ func TestBeginDrainWakesProducerWithoutLosingAcceptedData(t *testing.T) {
 		t.Fatalf("Close=%d,%v", len(n), err)
 	}
 }
+
+// A rollout may drain thousands of large-window clients at once. Request the
+// cumulative tail ACK once, without turning every queued frame into an ACK RPC.
+func TestDrainRequestsOnlyOneExtraAckForQueuedBatch(t *testing.T) {
+	b, _ := NewAckBuffer(AckBufferOptions{})
+	b.UpdateCapacity(1000)
+	for i := 0; i < 40; i++ {
+		if !b.Add(&protocol.DataMessage{TextPayload: "event"}, time.Second) {
+			t.Fatal("Add")
+		}
+	}
+	done := make(chan error, 1)
+	go func() { done <- (&Client{ab: b}).Drain(time.Second) }()
+	waitFor(t, "sealed admission", func() bool { b.RLock(); defer b.RUnlock(); return !b.isRunning })
+	requests := 0
+	for i := 0; i < 40; i++ {
+		msg := b.GetNextToDeliver(time.Second)
+		if msg == nil {
+			t.Fatal("queued data disappeared")
+		}
+		if msg.AckRequested {
+			requests++
+			if i != 39 {
+				t.Errorf("extra ACK request before final queued frame: %d", i)
+			}
+		}
+	}
+	if requests != 1 {
+		t.Fatalf("drain generated%d ACK requests, want1 cumulative tail ACK", requests)
+	}
+	if err := b.Ack(40); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

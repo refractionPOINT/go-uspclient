@@ -449,8 +449,9 @@ func (b *AckBuffer) GetNextToDeliver(timeout time.Duration) *protocol.DataMessag
 		return nil
 	}
 	n := b.buff[b.nextIndexToDeliver]
-	if !b.isRunning {
+	if !b.isRunning && b.nextIndexToDeliver+1 == b.nextIndexFree {
 		// Do not mutate the retained message while a sender may encode it.
+		// Cumulative ACKs need one extra request, on the final queued frame.
 		// Already transmitted tails are confirmed by the proxy's periodic ACK.
 		copy := *n
 		copy.AckRequested = true
