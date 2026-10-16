@@ -150,7 +150,8 @@ func (b *AckBuffer) BufferedBytes() uint64 {
 // Add queues a message, blocking while the buffer has no room: the
 // message-count window is full, or the per-client / shared byte budget would
 // be exceeded. timeout == 0 waits until there is room or the buffer is closed.
-// It returns false on timeout or if the buffer is (or becomes) closed.
+// It returns false on timeout or if the buffer is (or becomes) closed; use the
+// client's Ship to tell the two apart.
 //
 // A buffer that holds no message with an ack request pending (in particular an
 // empty one) admits one message even if it exceeds the byte caps, and flags it
@@ -158,8 +159,14 @@ func (b *AckBuffer) BufferedBytes() uint64 {
 // never waits on bytes without an ack already requested. The shared budget can
 // therefore be overshot by at most one message per client.
 func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
+	return b.add(e, timeout) == nil
+}
+
+// add is Add with the reason for a failure: ErrorClosed when the buffer is (or
+// becomes) closed, ErrorBufferFull when the timeout expired (or e is nil).
+func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
 	if e == nil {
-		return false
+		return ErrorBufferFull
 	}
 
 	var size uint64
@@ -185,12 +192,12 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 		b.Lock()
 		if !b.isRunning {
 			b.Unlock()
-			return false
+			return ErrorClosed
 		}
 		ok, poolWake := b.tryAddLocked(e, size)
 		if ok {
 			b.Unlock()
-			return true
+			return nil
 		}
 		if b.wake == nil {
 			b.wake = make(chan struct{})
@@ -201,7 +208,7 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 		if !deadlineC.IsZero() {
 			remaining := time.Until(deadlineC)
 			if remaining <= 0 {
-				return false
+				return b.timeoutErr()
 			}
 			if b.onBackPressure != nil {
 				b.onBackPressure()
@@ -216,9 +223,20 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 		case <-localWake:
 		case <-poolWake: // nil (blocks forever) when not waiting on the pool
 		case <-timerC:
-			return false
+			return b.timeoutErr()
 		}
 	}
+}
+
+// timeoutErr is the error for an Add that ran out of time: the buffer being
+// closed at that moment takes precedence over the timeout.
+func (b *AckBuffer) timeoutErr() error {
+	b.RLock()
+	defer b.RUnlock()
+	if !b.isRunning {
+		return ErrorClosed
+	}
+	return ErrorBufferFull
 }
 
 // tryAddLocked admits e if there is room. When it fails because the shared
