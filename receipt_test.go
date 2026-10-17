@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,6 +143,97 @@ func TestReceiptCloseJoinsSenderBeforeReturningSourceOwnership(t *testing.T) {
 	receiptResult(t, receipt, ErrorClosed)
 }
 
+func TestReceiptRequestsCumulativeProgressWithoutAckPerMessage(t *testing.T) {
+	c, srv := drainClient(t, nil)
+	// All 100 messages fit the peer's real window. Use a larger local window
+	// to put the normal count-request interval beyond this bounded source.
+	c.ab.UpdateCapacity(100000)
+	var receipts []*Receipt
+	for i := 0; i < 100; i++ {
+		r, err := c.ShipWithReceipt(&protocol.DataMessage{TextPayload: "bounded-source"}, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipts = append(receipts, r)
+	}
+	for seq := uint64(1); seq <= 100; seq++ {
+		receiveSeq(t, srv, seq)
+	}
+	if got := srv.requested.Load(); got != 1 {
+		t.Fatalf("ACK requests for one unconfirmed prefix=%d want=1", got)
+	}
+	srv.ack(t, 1)
+	receiptResult(t, receipts[0], nil)
+	// Completing the first callback frees one source permit. Its next message
+	// must request a cumulative ACK covering the whole remaining prefix.
+	tail, err := c.ShipWithReceipt(&protocol.DataMessage{TextPayload: "next-permit"}, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiveSeq(t, srv, 101)
+	if got := srv.requested.Load(); got != 2 {
+		t.Fatalf("next progress request=%d want=2", got)
+	}
+	srv.ack(t, 101)
+	for _, r := range receipts {
+		receiptResult(t, r, nil)
+	}
+	receiptResult(t, tail, nil)
+}
+
+// A read-acknowledging peer may ACK requested frames immediately and otherwise
+// only send a periodic cumulative ACK every 30s. A quiet, already-written tail
+// must remain source-owned until that slow confirmation, within a bounded drain.
+func TestReceiptSlowPeriodicPeerConfirmsAlreadyWrittenTail(t *testing.T) {
+	c, srv := drainClient(t, nil)
+	c.ab.UpdateCapacity(100000)
+	var receipts []*Receipt
+	for i := 0; i < 100; i++ {
+		r, err := c.ShipWithReceipt(&protocol.DataMessage{TextPayload: "quiet-tail"}, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		receipts = append(receipts, r)
+	}
+	for seq := uint64(1); seq <= 100; seq++ {
+		receiveSeq(t, srv, seq)
+	}
+	if got := srv.requested.Load(); got != 1 {
+		t.Fatalf("unexpected per-message requests: %d", got)
+	}
+	srv.ack(t, 1)
+	receiptResult(t, receipts[0], nil)
+	receiptPending(t, receipts[len(receipts)-1])
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() { done <- c.Drain(35 * time.Second) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Drain returned before slow periodic confirmation: %v", err)
+	case <-time.After(30 * time.Second):
+	}
+	// No new data or request marker is sent: the peer confirms its latest read
+	// sequence on its normal slow periodic interval.
+	srv.ack(t, 100)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Drain missed the slow periodic ACK")
+	}
+	if elapsed := time.Since(start); elapsed >= 35*time.Second {
+		t.Fatalf("slow periodic drain exceeded bound: %s", elapsed)
+	}
+	for _, receipt := range receipts {
+		receiptResult(t, receipt, nil)
+	}
+	if messages, err := c.Close(); err != nil || len(messages) != 0 {
+		t.Fatalf("Close=%d, %v", len(messages), err)
+	}
+}
+
 func TestReceiptAckCloseRaceAndAlreadyConfirmedOwnership(t *testing.T) {
 	// Exercise the actual AckBuffer admission/ACK/Close locking, including
 	// independent waiters on the same receipt and repeated Close.
@@ -153,6 +245,11 @@ func TestReceiptAckCloseRaceAndAlreadyConfirmedOwnership(t *testing.T) {
 		r := &Receipt{done: make(chan struct{})}
 		if err := b.addWithReceipt(&protocol.DataMessage{}, time.Second, r); err != nil {
 			t.Fatal(err)
+		}
+		select {
+		case <-r.done:
+			t.Fatal("receipt completed before either ACK or Close")
+		default:
 		}
 		b.GetNextToDeliver(time.Second)
 		var wg sync.WaitGroup
@@ -183,6 +280,7 @@ func TestReceiptAckCloseRaceAndAlreadyConfirmedOwnership(t *testing.T) {
 
 func TestReceiptImmediateAckDoesNotRaceRegistration(t *testing.T) {
 	serverErrors := make(chan error, 1)
+	var periodic atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		conn, err := wsUpgrader.Upgrade(w, req, nil)
 		if err != nil {
@@ -198,6 +296,30 @@ func TestReceiptImmediateAckDoesNotRaceRegistration(t *testing.T) {
 		if err := conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageFLOW, WindowSize: 100000}); err != nil {
 			return
 		}
+		var writeMu sync.Mutex
+		var tail atomic.Uint64
+		ack := func(seq uint64) error {
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			return conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageACK, SeqNum: seq})
+		}
+		stop, stopped := make(chan struct{}), make(chan struct{})
+		go func() {
+			defer close(stopped)
+			ticker := time.NewTicker(10 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-ticker.C:
+					if seq := tail.Load(); periodic.Load() && seq != 0 {
+						_ = ack(seq)
+					}
+				}
+			}
+		}()
+		defer func() { close(stop); <-stopped }()
 		for {
 			_, raw, err := conn.ReadMessage()
 			if err != nil {
@@ -208,10 +330,11 @@ func TestReceiptImmediateAckDoesNotRaceRegistration(t *testing.T) {
 				serverErrors <- err
 				return
 			}
-			// No periodic ACK: a bounded source must request its own progress
-			// even after the peer opens a very large window.
+			tail.Store(message.SeqNum)
+			// Periodic ACKs stay disabled until the first receipt succeeds:
+			// it must request progress even with the large FLOW window.
 			if message.AckRequested {
-				if err := conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageACK, SeqNum: message.SeqNum}); err != nil {
+				if err := ack(message.SeqNum); err != nil {
 					return
 				}
 			}
@@ -233,6 +356,9 @@ func TestReceiptImmediateAckDoesNotRaceRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	receiptResult(t, first, nil)
+	// Real peers periodically confirm a written tail after producers stop.
+	// Enable that behavior only after proving the single-receipt request.
+	periodic.Store(true)
 	var wg sync.WaitGroup
 	for worker := 0; worker < 32; worker++ {
 		wg.Add(1)

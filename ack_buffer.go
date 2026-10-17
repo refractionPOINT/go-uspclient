@@ -251,6 +251,14 @@ func (b *AckBuffer) addWithReceipt(e *protocol.DataMessage, timeout time.Duratio
 		ok, poolWake := b.tryAddLocked(e, size)
 		if ok {
 			if receipt != nil {
+				// A bounded source must not wait for room with no ACK request
+				// outstanding. One cumulative request is enough while it is in
+				// flight; requesting on every receipt adds avoidable control work.
+				if !e.AckRequested && (b.lastFlaggedSeq == 0 || b.lastFlaggedSeq < b.firstSeqNum) {
+					e.AckRequested = true
+					b.lastFlaggedSeq = e.SeqNum
+					b.bytesSinceFlag = 0
+				}
 				if b.receipts == nil {
 					b.receipts = make(map[uint64]*Receipt)
 				}
@@ -439,13 +447,10 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		b.bytes -= freed
 		b.shared.release(freed)
 	}
-	for i := indexAcked + 1; i < uint64(len(b.buff)); i++ {
-		b.buff[i-indexAcked-1] = b.buff[i]
-	}
-	b.nextIndexFree = b.nextIndexFree - indexAcked - 1
-	for i := b.nextIndexFree; i < uint64(len(b.buff)); i++ {
-		b.buff[i] = nil
-	}
+	oldFree := b.nextIndexFree
+	copy(b.buff, b.buff[indexAcked+1:oldFree])
+	b.nextIndexFree = oldFree - indexAcked - 1
+	clear(b.buff[b.nextIndexFree:oldFree])
 	b.isAvailable.Set()
 	b.signalLocked()
 

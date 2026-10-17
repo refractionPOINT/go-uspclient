@@ -736,9 +736,11 @@ func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) erro
 // receipt. A successful admission is not delivery confirmation: call Wait on the
 // receipt before acknowledging an upstream source. A failed admission returns
 // no receipt. Close completes every unconfirmed receipt with ErrorClosed.
+// Do not mutate or reuse an admitted message until its receipt completes.
 //
-// This path requests an ACK on the message so a caller holding a bounded number
-// of upstream messages can make progress even with a large proxy FLOW window.
+// This path ensures an ACK request is outstanding so a bounded upstream source
+// can make progress even with a large proxy FLOW window. Cumulative requests are
+// shared; already-transmitted tails use the proxy's periodic ACK, as with Drain.
 // It adds no wire protocol fields and works with older, read-acknowledging peers.
 func (c *Client) ShipWithReceipt(message *protocol.DataMessage, timeout time.Duration) (*Receipt, error) {
 	if message == nil {
@@ -749,7 +751,6 @@ func (c *Client) ShipWithReceipt(message *protocol.DataMessage, timeout time.Dur
 		receipt.finish(nil)
 		return receipt, nil
 	}
-	message.AckRequested = true
 	if err := c.ab.addWithReceipt(message, timeout, receipt); err != nil {
 		return nil, err
 	}

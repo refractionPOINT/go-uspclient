@@ -24,7 +24,8 @@ type ackDrivenServer struct {
 	writeMsg func(v interface{}) error
 	conns    int
 
-	received chan uint64 // seq of every data message received, per delivery
+	received  chan uint64 // seq of every data message received, per delivery
+	requested atomic.Uint64
 }
 
 func newAckDrivenServer(t *testing.T) *ackDrivenServer {
@@ -64,6 +65,9 @@ func newAckDrivenServer(t *testing.T) *ackDrivenServer {
 			m := protocol.DataMessage{}
 			if err := msgpack.Unmarshal(raw, &m); err != nil {
 				return
+			}
+			if m.AckRequested {
+				s.requested.Add(1)
 			}
 			s.received <- m.SeqNum
 		}
