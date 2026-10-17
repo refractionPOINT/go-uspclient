@@ -561,18 +561,17 @@ func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
 		newBuff := make([]*protocol.DataMessage, newCapacity)
 		copy(newBuff, b.buff)
 		b.buff = newBuff
-		b.isAvailable.Set()
-	} else if b.currentCapacity < newCapacity {
-		if b.nextIndexFree == b.currentCapacity {
-			b.isAvailable.Set()
-		}
-	} else if b.currentCapacity > newCapacity {
-		if b.nextIndexFree >= newCapacity {
-			b.isAvailable.Clear()
-		}
 	}
 	b.currentCapacity = newCapacity
 	b.shrinkBackingLocked()
+	// Partial ACKs can leave an old, overfull window closed. FLOW resumes
+	// admission whenever the retained prefix fits with room, independently of
+	// whether resizing needs a larger allocation or matched the former window.
+	if b.nextIndexFree < newCapacity {
+		b.isAvailable.Set()
+	} else {
+		b.isAvailable.Clear()
+	}
 	b.signalLocked()
 	b.ackEvery = uint64(float64(newCapacity) * ackPercentOfCapacity)
 	if b.ackEvery == 0 {
