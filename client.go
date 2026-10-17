@@ -478,6 +478,13 @@ func (c *Client) createProxyDialer() (*websocket.Dialer, error) {
 }
 
 func (c *Client) connect(ctx context.Context) error {
+	return c.connectBeforeWorkers(ctx, nil)
+}
+
+// beforeWorkers hands reconnect ownership back before the new workers can
+// request another reconnect. Otherwise an immediate failure can be forgotten
+// while the previous reconnect owner is still returning from connect.
+func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func()) error {
 	c.log("usp-client connecting")
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
@@ -601,7 +608,13 @@ func (c *Client) connect(ctx context.Context) error {
 	}
 
 	c.isStop.Clear()
-	defer c.isStart.Set()
+	defer func() {
+		if beforeWorkers != nil {
+			beforeWorkers()
+		}
+		c.isStart.Set()
+		c.log("usp-client connected")
+	}()
 	c.conn = conn
 	c.wg.Add(1)
 	go func() {
@@ -618,7 +631,6 @@ func (c *Client) connect(ctx context.Context) error {
 		defer c.wg.Done()
 		c.keepAliveSender()
 	}()
-	c.log("usp-client connected")
 	return nil
 }
 
@@ -667,7 +679,12 @@ func (c *Client) Reconnect() {
 		// We assume that anything that was not ACKed should be resent
 		c.ab.ResetDelivery()
 
-		defer atomic.StoreUint32(&c.isReconnecting, 0)
+		ownsReconnect := true
+		defer func() {
+			if ownsReconnect {
+				atomic.StoreUint32(&c.isReconnecting, 0)
+			}
+		}()
 
 		// Clients not built by NewClient have no close context.
 		closeCtx := c.closeCtx
@@ -677,7 +694,12 @@ func (c *Client) Reconnect() {
 
 		for {
 			// Keep trying until connected, but only until Close() is called.
-			err := c.connect(closeCtx)
+			err := c.connectBeforeWorkers(closeCtx, func() {
+				// A worker can immediately acquire the next reconnect once
+				// isStart is set. This owner's defer must not clear its flag.
+				ownsReconnect = false
+				atomic.StoreUint32(&c.isReconnecting, 0)
+			})
 			if err == nil {
 				return
 			}
