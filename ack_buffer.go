@@ -81,6 +81,10 @@ type AckBuffer struct {
 	// waiting for changes: room freed by an ack, capacity change, Close.
 	// It is created lazily by the first Add that has to block.
 	wake chan struct{}
+
+	// Only the opt-in receipt API allocates this map. Admission and receipt
+	// registration share the lock, so even an immediate ACK cannot be missed.
+	receipts map[uint64]*Receipt
 }
 
 func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
@@ -120,6 +124,11 @@ func (b *AckBuffer) Close() {
 	defer b.Unlock()
 	b.isRunning = false
 	b.isClosed = true
+	for seq, receipt := range b.receipts {
+		receipt.finish(ErrorClosed)
+		delete(b.receipts, seq)
+	}
+	b.receipts = nil
 	b.releaseAllLocked()
 	b.signalLocked()
 }
@@ -203,6 +212,10 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 // add is Add with the reason for a failure: ErrorClosed when the buffer is (or
 // becomes) closed, ErrorBufferFull when the timeout expired (or e is nil).
 func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
+	return b.addWithReceipt(e, timeout, nil)
+}
+
+func (b *AckBuffer) addWithReceipt(e *protocol.DataMessage, timeout time.Duration, receipt *Receipt) error {
 	if e == nil {
 		return ErrorBufferFull
 	}
@@ -210,6 +223,9 @@ func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
 	var size uint64
 	if b.accounting {
 		size = estimateMessageSize(e)
+		if receipt != nil {
+			size += receiptOverheadBytes
+		}
 	}
 
 	var (
@@ -234,6 +250,12 @@ func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
 		}
 		ok, poolWake := b.tryAddLocked(e, size)
 		if ok {
+			if receipt != nil {
+				if b.receipts == nil {
+					b.receipts = make(map[uint64]*Receipt)
+				}
+				b.receipts[e.SeqNum] = receipt
+			}
 			b.Unlock()
 			return nil
 		}
@@ -393,6 +415,16 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		}
 	}
 
+	// A validated cumulative ACK confirms each covered receipt. Complete only
+	// after every ACK validation above has succeeded, never on an invalid ACK.
+	if len(b.receipts) != 0 {
+		for _, message := range b.buff[:indexAcked+1] {
+			if receipt := b.receipts[message.SeqNum]; receipt != nil {
+				receipt.finish(nil)
+				delete(b.receipts, message.SeqNum)
+			}
+		}
+	}
 	b.firstSeqNum = seq + 1
 	if b.accounting {
 		var freed uint64

@@ -8,6 +8,36 @@ Golang USP Client
 - HTTP CONNECT proxy support for restricted networks
 - Flexible event mapping and transformation
 
+## Confirming upstream delivery
+
+`Ship` confirms admission into the client's local buffer. For a source that can
+redeliver messages, use `ShipWithReceipt` and wait for its receipt before
+acknowledging the source:
+
+```go
+receipt, err := client.ShipWithReceipt(message, time.Second)
+if err != nil {
+    // The client did not accept the message; the source can retry it.
+    return err
+}
+if err := receipt.Wait(ctx); err != nil {
+    // Canceling the wait does not withdraw the admitted message. Stop the
+    // client with Close before handing this message back to the source.
+    _, closeErr := client.Close()
+    return errors.Join(err, closeErr)
+}
+// The proxy has acknowledged this message; acknowledge the upstream source.
+```
+
+Receipts use the connected proxy's acknowledgement semantics. Older proxies
+acknowledge on read; a receipt cannot upgrade that guarantee. `Close` completes
+unconfirmed receipts with `ErrorClosed` after the sender has stopped. During a
+graceful stop, call `BeginDrain` to stop admission, then `DrainContext` with a
+bounded context before `Close`. Keep source callbacks and their transport alive
+until receipts have completed and source acknowledgements have flushed.
+Every other admitted message also needs recovery: its receipt reports either
+confirmation or `ErrorClosed`, and `Close` returns all unconfirmed payloads.
+
 ## Proxy Support
 The USP client supports connecting to LimaCharlie cloud through HTTP CONNECT proxies. This is useful in enterprise environments where direct internet access is restricted.
 

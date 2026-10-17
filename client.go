@@ -353,8 +353,12 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	if c.closeCancel != nil {
 		c.closeCancel()
 	}
-	c.ab.Close()
+	// Wake blocked producers now, but retain receipt ownership until every
+	// sender has stopped. A source may Nack immediately when Close resolves a
+	// receipt; this client must not also continue transmitting that message.
+	c.BeginDrain()
 	err1 := c.disconnect()
+	c.ab.Close()
 	messages, err2 := c.ab.GetUnAcked()
 	err := err1
 	if err == nil {
@@ -726,6 +730,30 @@ func (c *Client) Ship(message *protocol.DataMessage, timeout time.Duration) erro
 		return nil
 	}
 	return c.ab.add(message, timeout)
+}
+
+// ShipWithReceipt admits a message like Ship and returns its proxy confirmation
+// receipt. A successful admission is not delivery confirmation: call Wait on the
+// receipt before acknowledging an upstream source. A failed admission returns
+// no receipt. Close completes every unconfirmed receipt with ErrorClosed.
+//
+// This path requests an ACK on the message so a caller holding a bounded number
+// of upstream messages can make progress even with a large proxy FLOW window.
+// It adds no wire protocol fields and works with older, read-acknowledging peers.
+func (c *Client) ShipWithReceipt(message *protocol.DataMessage, timeout time.Duration) (*Receipt, error) {
+	if message == nil {
+		return nil, ErrorBufferFull
+	}
+	receipt := &Receipt{done: make(chan struct{})}
+	if c.options.TestSinkMode {
+		receipt.finish(nil)
+		return receipt, nil
+	}
+	message.AckRequested = true
+	if err := c.ab.addWithReceipt(message, timeout, receipt); err != nil {
+		return nil, err
+	}
+	return receipt, nil
 }
 
 // BufferedBytes returns the estimated size of the messages that were shipped
