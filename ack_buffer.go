@@ -428,8 +428,10 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	if len(b.receipts) != 0 {
 		for _, message := range b.buff[:indexAcked+1] {
 			if receipt := b.receipts[message.SeqNum]; receipt != nil {
-				receipt.finish(nil)
 				delete(b.receipts, message.SeqNum)
+				// Completion returns ownership to the caller, which can
+				// immediately mutate the message. Finish all field reads first.
+				receipt.finish(nil)
 			}
 		}
 	}

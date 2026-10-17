@@ -75,6 +75,47 @@ func TestReceiptCumulativeConfirmationAndCanceledWait(t *testing.T) {
 	}
 }
 
+func TestReceiptCompletionAllowsImmediateMessageReuse(t *testing.T) {
+	b, err := NewAckBuffer(AckBufferOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{ab: b}
+	message := &protocol.DataMessage{TextPayload: "reusable"}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for i := 0; i < 256; i++ {
+		receipt, err := c.ShipWithReceipt(message, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.GetNextToDeliver(0) != message {
+			t.Fatal("admitted message was not delivered")
+		}
+		seq := message.SeqNum
+		done := make(chan error, 1)
+		go func() {
+			err := receipt.Wait(ctx)
+			if err == nil {
+				// Receipt completion returns message ownership. The ACK
+				// handler must never read these fields after publishing it.
+				*message = protocol.DataMessage{TextPayload: "reused"}
+			}
+			done <- err
+		}()
+		if err := b.Ack(seq); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		if len(b.receipts) != 0 {
+			t.Fatalf("completion retained %d receipt registrations", len(b.receipts))
+		}
+	}
+	b.Close()
+}
+
 func TestReceiptReconnectAndCloseReturnsSourceOwnership(t *testing.T) {
 	pool := NewByteBudget(testMsgSize)
 	c, srv := drainClient(t, pool)
