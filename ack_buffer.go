@@ -453,7 +453,17 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	copy(b.buff, b.buff[indexAcked+1:oldFree])
 	b.nextIndexFree = oldFree - indexAcked - 1
 	clear(b.buff[b.nextIndexFree:oldFree])
-	b.isAvailable.Set()
+	// A reconnect can reduce FLOW while an older, larger window is still
+	// unconfirmed. Keep those messages until ACK, then reclaim its backing
+	// allocation once the pending prefix fits the new window.
+	if b.nextIndexFree <= b.currentCapacity {
+		b.shrinkBackingLocked()
+	}
+	if b.nextIndexFree < b.currentCapacity {
+		b.isAvailable.Set()
+	} else {
+		b.isAvailable.Clear()
+	}
 	b.signalLocked()
 
 	// Adjust nextIndexToDeliver to account for removed messages
@@ -523,6 +533,22 @@ func (b *AckBuffer) GetCurrentCapacity() uint64 {
 	return b.currentCapacity
 }
 
+// shrinkBackingLocked reclaims a former FLOW window without discarding any
+// pending message or its byte charge. Must hold the buffer lock.
+func (b *AckBuffer) shrinkBackingLocked() {
+	target := max(b.currentCapacity, b.nextIndexFree, initialCapacity)
+	if uint64(len(b.buff)) > target {
+		buffer := make([]*protocol.DataMessage, target)
+		copy(buffer, b.buff[:b.nextIndexFree])
+		b.buff = buffer
+	}
+	if uint64(cap(b.sizes)) > target {
+		sizes := make([]uint64, len(b.sizes), target)
+		copy(sizes, b.sizes)
+		b.sizes = sizes
+	}
+}
+
 func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
 	b.Lock()
 	defer b.Unlock()
@@ -531,7 +557,6 @@ func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
 		return
 	}
 
-	// We only ever grow the capacity.
 	if uint64(len(b.buff)) < newCapacity {
 		newBuff := make([]*protocol.DataMessage, newCapacity)
 		copy(newBuff, b.buff)
@@ -547,6 +572,7 @@ func (b *AckBuffer) UpdateCapacity(newCapacity uint64) {
 		}
 	}
 	b.currentCapacity = newCapacity
+	b.shrinkBackingLocked()
 	b.signalLocked()
 	b.ackEvery = uint64(float64(newCapacity) * ackPercentOfCapacity)
 	if b.ackEvery == 0 {
