@@ -15,7 +15,7 @@ Clients can share a memory budget for messages awaiting backend acknowledgment.
 multiple organizations, use a fair budget and a trusted organization identifier:
 
 ```go
-pool, err := uspclient.NewFairByteBudget(1<<30, 4096)
+pool, err := uspclient.NewFairByteBudget(1<<30, uspclient.FairByteBudgetOptions{})
 if err != nil {
     return err
 }
@@ -26,22 +26,33 @@ options.BufferOptions = uspclient.AckBufferOptions{
 }
 ```
 
-Each group has a protected floor of `total/(2*groupSlots)` bytes. Clients in the
-same group share that floor. The remaining bytes are available for borrowing.
-Unused slots' floors stay reserved, so an organization that joins after another
-organization fills the lendable pool can still admit a window of messages.
-Unacknowledged messages cannot be taken back from borrowers, which is why the
-number of groups is bounded before lending starts. A pool accepts at most
-`groupSlots` distinct groups; another client in an existing group needs no extra
-slot. Client creation returns an error for an empty group or exhausted group
-capacity. Close every client to return its bytes and release its group slot.
-`BudgetGroup` and `SharedBudget` are process-local and never serialized.
+The byte-budget invariant is: "bounded newcomer runway, plus eventual fair turns as eligible bytes are released, plus the per-client one-frame escape (so no org is ever at zero progress)".
 
-The byte cap remains soft by at most one additional message per client: without
-a pending ACK request, a client may admit one flagged message even when its limit
-is full. These escape messages remain included in `Used()` but cannot consume
-other groups' protected floors. A floor smaller than one message cannot promise
-a multi-message window. Per-client count and byte limits still apply.
+`ReserveBytes` defaults to one eighth of the total. Any group can borrow from the
+other seven eighths. Inside the reserve, a group's projected usage must be at
+most `max(total/max(activeGroups, 2), MinGroupBytes)`. The minimum denominator of
+two prevents a lone borrower from consuming the entire reserve before another
+group arrives. Active groups hold bytes or waiters; idle registered clients do
+not count. `MinGroupBytes` defaults to 256 bytes, the estimated overhead of an
+empty message. It changes eligibility, without overriding the shared cap.
+Clients in the same group share accounting, so adding adapters cannot multiply
+a group's eligibility. There is no group-count cap or group-count-dependent
+client creation failure.
+
+This reserve offers bounded runway, not an immediate guaranteed floor for every
+arrival. For example, one parked group can hold seven eighths, a second can fill
+the reserve, and a third then has only its one-message escape until eligible
+bytes return. Unacknowledged messages cannot be reclaimed from borrowers.
+Blocked groups receive round-robin byte credits with FIFO order inside a group.
+Large requests retain partial credits so continuing small requests cannot steal
+all released memory. Timeout and Close return unused credits.
+
+The byte cap is soft by at most one additional message per client: without a
+pending ACK request, a client may admit one flagged message even when its byte
+limit is full. Escape messages stay included in `Used()` but do not consume the
+normal newcomer reserve; they still count toward their own group's eligibility. Existing count-window and connection flow limits still
+apply. Close every client to return its bytes. `BudgetGroup` and `SharedBudget`
+are process-local and never serialized.
 
 ## Proxy Support
 The USP client supports connecting to LimaCharlie cloud through HTTP CONNECT proxies. This is useful in enterprise environments where direct internet access is restricted.

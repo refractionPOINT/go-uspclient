@@ -35,7 +35,7 @@ type AckBufferOptions struct {
 	// serialized: it only makes sense inside one process.
 	SharedBudget *ByteBudget `json:"-" yaml:"-" msgpack:"-"`
 
-	// BudgetGroup identifies clients sharing one protected floor when using
+	// BudgetGroup identifies clients sharing newcomer runway eligibility with
 	// NewFairByteBudget. It must be nonempty for a fair budget, is ignored by
 	// NewByteBudget, and is never serialized. Set it from a trusted tenant ID.
 	BudgetGroup string `json:"-" yaml:"-" msgpack:"-"`
@@ -427,6 +427,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		}
 	}
 
+	escapeIndex := b.escapeSeq - b.firstSeqNum
 	b.firstSeqNum = seq + 1
 	if b.accounting {
 		var freed uint64
@@ -440,7 +441,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		}
 		b.bytes -= freed
 		var escape uint64
-		if b.escapeBytes != 0 && b.escapeSeq-b.firstSeqNum <= indexAcked {
+		if b.escapeBytes != 0 && escapeIndex <= indexAcked {
 			escape = b.escapeBytes
 			b.escapeBytes = 0
 		}

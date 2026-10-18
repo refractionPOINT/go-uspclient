@@ -5,81 +5,78 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
-
-	"github.com/google/uuid"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/refractionPOINT/go-uspclient/protocol"
 )
 
-func fairPool(t *testing.T, frames uint64, slots uint32) *ByteBudget {
+func fairPool(t *testing.T, frames, reserve uint64) *ByteBudget {
 	t.Helper()
-	p, err := NewFairByteBudget(frames*testMsgSize, slots)
+	p, err := NewFairByteBudget(frames*testMsgSize, FairByteBudgetOptions{ReserveBytes: reserve * testMsgSize})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return p
 }
-
 func groupedBuffer(t *testing.T, p *ByteBudget, key string) *AckBuffer {
 	t.Helper()
 	b := newBudgetBuffer(t, AckBufferOptions{SharedBudget: p, BudgetGroup: key})
 	t.Cleanup(b.Close)
 	return b
 }
-
 func flaggedTestMessage() *protocol.DataMessage {
 	m := textMsg(testMsgPayload)
 	m.AckRequested = true
 	return m
 }
 
-// A parks before B even registers. It consumes every byte it can borrow via
-// four clients. B must retain a multi-frame window without any ACK from A.
-func TestFairByteBudgetParkedTenantCannotConsumeNewTenantFloor(t *testing.T) {
-	p := fairPool(t, 64, 2) // 16 protected frames per tenant, 32 lendable frames.
+// A parks before B registers, using every lendable byte via four clients.
+// B can use the bounded newcomer runway repeatedly without an ACK from A.
+func TestFairByteBudgetParkedTenantCannotConsumeNewTenantRunway(t *testing.T) {
+	p := fairPool(t, 64, 8)
 	var parked []*AckBuffer
 	for i := 0; i < 4; i++ {
 		parked = append(parked, groupedBuffer(t, p, "tenant-a"))
 	}
 	admitted := 0
 	for ; admitted < 128; admitted++ {
-		if !parked[admitted%len(parked)].Add(flaggedTestMessage(), 10*time.Millisecond) {
+		if !parked[admitted%4].Add(flaggedTestMessage(), 10*time.Millisecond) {
 			break
 		}
 	}
 	if admitted == 128 {
-		t.Fatal("parked tenant has no memory bound")
+		t.Fatal("parked tenant has no bound")
 	}
 	healthy := groupedBuffer(t, p, "tenant-b")
 	for round := 0; round < 20; round++ {
-		for i := 0; i < 16; i++ {
+		for i := 0; i < 8; i++ {
 			if !healthy.Add(flaggedTestMessage(), time.Second) {
 				t.Fatalf("healthy tenant stalled at round=%d frame=%d", round, i)
 			}
 		}
-		if got := p.Used(); got != 64*testMsgSize {
-			t.Fatalf("used=%d want=%d", got, 64*testMsgSize)
+		if p.Used() != 64*testMsgSize {
+			t.Fatalf("used=%d want%d", p.Used(), 64*testMsgSize)
 		}
-		deliverAndAck(t, healthy, 16)
+		deliverAndAck(t, healthy, 8)
 	}
-	if admitted != 48 {
-		t.Fatalf("parked admitted=%d want48", admitted)
+	if admitted != 56 {
+		t.Fatalf("borrower admitted%d want56", admitted)
 	}
-	if got, _ := parked[0].GetUnAcked(); len(got) != 12 {
-		t.Fatalf("parked messages changed: %d", len(got))
+	if got, _ := parked[0].GetUnAcked(); len(got) != 14 {
+		t.Fatal("parked tail changed")
 	}
 }
 
-// The existing per-client one-message escape remains charged to Used, but
-// cannot consume another group's protected entitlement.
-func TestFairByteBudgetEscapePreservesOtherTenantFloor(t *testing.T) {
-	p := fairPool(t, 64, 2)
+func TestFairByteBudgetEscapePreservesNewcomerRunway(t *testing.T) {
+	p := fairPool(t, 64, 8)
 	a := groupedBuffer(t, p, "tenant-a")
-	for i := 0; i < 48; i++ {
+	for i := 0; i < 56; i++ {
 		if !a.Add(flaggedTestMessage(), time.Second) {
 			t.Fatal(i)
 		}
@@ -88,140 +85,269 @@ func TestFairByteBudgetEscapePreservesOtherTenantFloor(t *testing.T) {
 	if !escape.Add(textMsg(100*testMsgSize), time.Second) {
 		t.Fatal("oversized first message must escape")
 	}
-	healthy := groupedBuffer(t, p, "tenant-b")
-	for i := 0; i < 16; i++ {
-		if !healthy.Add(flaggedTestMessage(), time.Second) {
-			t.Fatalf("healthy admission %d", i)
+	b := groupedBuffer(t, p, "tenant-b")
+	for i := 0; i < 8; i++ {
+		if !b.Add(flaggedTestMessage(), time.Second) {
+			t.Fatalf("newcomer%d", i)
 		}
 	}
 	escaped, _ := escape.GetUnAcked()
-	if got := p.Used(); got != 64*testMsgSize+estimateMessageSize(escaped[0]) {
-		t.Fatalf("escape accounting: %d", got)
+	if p.Used() != 64*testMsgSize+estimateMessageSize(escaped[0]) {
+		t.Fatal("escape accounting")
 	}
 	deliverAndAck(t, escape, 1)
-	escape.Close() // ACK followed by Close must not return the escape twice.
+	escape.Close()
 	if p.Used() != 64*testMsgSize {
-		t.Fatal("escape release changed healthy bytes")
+		t.Fatal("escape returned another tenant's bytes")
 	}
 }
 
-func TestFairByteBudgetGroupRegistrationAndReuse(t *testing.T) {
-	for _, tc := range []struct {
-		total uint64
-		slots uint32
-	}{{0, 2}, {100, 0}, {3, 2}} {
-		if _, err := NewFairByteBudget(tc.total, tc.slots); err == nil {
-			t.Fatalf("accepted invalid size %+v", tc)
+// A finite reserve cannot guarantee immediate room for every below-share
+// group: A holds7/8, B fills1/8, then B remains below its share but has no room.
+// C still gets its per-client escape and a fair turn when eligible bytes return.
+func TestFairByteBudgetFiniteRunwayExhaustionAndReleasedProgress(t *testing.T) {
+	p := fairPool(t, 64, 8)
+	a := groupedBuffer(t, p, "tenant-a")
+	for i := 0; i < 56; i++ {
+		if !a.Add(flaggedTestMessage(), time.Second) {
+			t.Fatal(i)
 		}
 	}
-	p := fairPool(t, 64, 2)
-	if _, err := NewAckBuffer(AckBufferOptions{SharedBudget: p}); err == nil {
-		t.Fatal("missing group accepted")
-	}
-	a := groupedBuffer(t, p, "tenant-a")
-	sibling := groupedBuffer(t, p, "tenant-a")
 	b := groupedBuffer(t, p, "tenant-b")
-	if _, err := NewAckBuffer(AckBufferOptions{SharedBudget: p, BudgetGroup: "tenant-c"}); err == nil {
-		t.Fatal("capacity overflow accepted")
+	for i := 0; i < 8; i++ {
+		if !b.Add(flaggedTestMessage(), time.Second) {
+			t.Fatal(i)
+		}
 	}
-	a.Close()
-	if _, err := NewAckBuffer(AckBufferOptions{SharedBudget: p, BudgetGroup: "tenant-c"}); err == nil {
-		t.Fatal("sibling still owns group")
+	if b.Add(flaggedTestMessage(), 10*time.Millisecond) {
+		t.Fatal("finite reserve was double spent")
 	}
-	sibling.Close()
 	c := groupedBuffer(t, p, "tenant-c")
-	if !c.Add(flaggedTestMessage(), time.Second) || !b.Add(flaggedTestMessage(), time.Second) {
-		t.Fatal("reused slot cannot admit")
+	if !c.Add(flaggedTestMessage(), time.Second) {
+		t.Fatal("newcomer lost one-frame escape")
 	}
-	a.Close()
-	b.Close()
-	c.Close()
-	sibling.Close()
-	assertBudgetEmpty(t, p)
+	if c.Add(flaggedTestMessage(), 10*time.Millisecond) {
+		t.Fatal("newcomer has no normal runway left")
+	}
+	done := addAsync(c, flaggedTestMessage(), time.Second)
+	// Ensure C has queued before releasing B's credits.
+	waitFor(t, "third group waiter", func() bool { p.mu.Lock(); defer p.mu.Unlock(); return c.group.pending != 0 })
+	deliverAndAck(t, b, 2)
+	expectResult(t, done, true, "third group released-byte turn")
+	if c.BufferedBytes() != 2*testMsgSize {
+		t.Fatal("third group failed to progress beyond escape")
+	}
+	if a.BufferedBytes() != 56*testMsgSize {
+		t.Fatal("parked bytes were revoked")
+	}
 }
 
 func assertBudgetEmpty(t *testing.T, p *ByteBudget) {
 	t.Helper()
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.used != 0 || p.escape != 0 || p.waiters.Len() != 0 || len(p.groups) != 0 || p.protected != p.floor*uint64(p.slots) {
-		t.Fatalf("budget leaked: used=%d escape=%d waiters=%d groups=%d protected=%d", p.used, p.escape, p.waiters.Len(), len(p.groups), p.protected)
+	if p.used != 0 || p.escape != 0 || p.active != 0 || p.waiting.Len() != 0 || p.reserveReady.Len() != 0 || len(p.blocked) != 0 || len(p.groups) != 0 {
+		t.Fatalf("budget leak: used%d escape%d active%d waiting%d reserve%d blocked%d groups%d", p.used, p.escape, p.active, p.waiting.Len(), p.reserveReady.Len(), len(p.blocked), len(p.groups))
 	}
 }
 
-// Waiter grants belong to an individual caller; a release too small for a
-// waiter does not wake it, and a later caller cannot steal a granted byte.
+// Idle registrations neither consume a share nor impose a creation limit.
+// A thousand simultaneous groups remain bounded by T plus one escape/client;
+// bookkeeping grows with actual clients, not a preallocated group table.
+func TestFairByteBudgetThousandGroupsNoAdmissionFailureAndBoundedMemory(t *testing.T) {
+	const groups = 1250
+	p := fairPool(t, 64, 8)
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	buffers := make([]*AckBuffer, 0, groups)
+	for i := 0; i < groups; i++ {
+		b, err := NewAckBuffer(AckBufferOptions{SharedBudget: p, BudgetGroup: fmt.Sprint(i)})
+		if err != nil {
+			t.Fatalf("group%d creation: %v", i, err)
+		}
+		buffers = append(buffers, b)
+	}
+	if p.active != 0 {
+		t.Fatal("idle registrations count as active")
+	}
+	for _, b := range buffers {
+		if !b.Add(flaggedTestMessage(), time.Second) {
+			t.Fatal("first-frame progress failed")
+		}
+	}
+	runtime.ReadMemStats(&after)
+	p.mu.Lock()
+	normal, escape, active := p.used-p.escape, p.escape, p.active
+	p.mu.Unlock()
+	if normal > p.total || escape > groups*testMsgSize || active != groups {
+		t.Fatalf("unbounded normal%d escape%d active%d", normal, escape, active)
+	}
+	if delta := after.TotalAlloc - before.TotalAlloc; delta > groups*16*1024 {
+		t.Fatalf("group bookkeeping allocated%d bytes", delta)
+	}
+	for _, b := range buffers {
+		b.Close()
+	}
+	assertBudgetEmpty(t, p)
+}
+
+func TestFairByteBudgetOptionsAndActiveLifecycle(t *testing.T) {
+	if _, err := NewFairByteBudget(100, FairByteBudgetOptions{ReserveBytes: 100}); err == nil {
+		t.Fatal("invalid reserve accepted")
+	}
+	p, err := NewFairByteBudget(1024, FairByteBudgetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.reserve != 128 {
+		t.Fatal("default reserve is not1/8")
+	}
+	if _, err := NewAckBuffer(AckBufferOptions{SharedBudget: p}); err == nil {
+		t.Fatal("missing trusted group accepted")
+	}
+	b := groupedBuffer(t, p, "tenant-a")
+	sibling := groupedBuffer(t, p, "tenant-a")
+	if p.active != 0 || len(p.groups) != 1 {
+		t.Fatal("idle siblings counted")
+	}
+	if !b.Add(flaggedTestMessage(), time.Second) {
+		t.Fatal("first frame")
+	}
+	if p.active != 1 {
+		t.Fatal("held group not active")
+	}
+	deliverAndAck(t, b, 1)
+	if p.active != 0 {
+		t.Fatal("empty live client still active")
+	}
+	b.Close()
+	sibling.Close()
+	assertBudgetEmpty(t, p)
+}
+
+// Byte credits reserve released memory for the large FIFO head. Smaller
+// requests in the same group cannot consume its credits or wake prematurely.
 func TestByteBudgetIndividualWaiterGrantsAndCancellation(t *testing.T) {
 	p := NewByteBudget(10)
-	if ok, _, _, _ := p.reserveFor(10, false, nil, nil); !ok {
-		t.Fatal("initial reserve")
-	}
+	p.reserveFor(10, false, nil, nil)
 	_, _, _, large := p.reserveFor(8, false, nil, nil)
 	_, _, _, small := p.reserveFor(2, false, nil, nil)
 	p.release(2)
 	select {
 	case <-large.wake:
-		t.Fatal("unfit waiter was woken")
+		t.Fatal("incomplete large waiter woken")
 	default:
 	}
 	select {
 	case <-small.wake:
+		t.Fatal("small waiter bypassed group FIFO")
 	default:
-		t.Fatal("eligible waiter not woken")
 	}
-	if p.Used() != 10 {
-		t.Fatal("grant not reserved")
+	if large.credit != 2 || small.credit != 0 || p.Used() != 10 {
+		t.Fatal("released bytes were not escrowed")
+	}
+	p.release(6)
+	select {
+	case <-large.wake:
+	default:
+		t.Fatal("large grant incomplete")
 	}
 	if ok, _, _, late := p.reserveFor(1, false, nil, nil); ok {
 		t.Fatal("late producer stole grant")
 	} else {
 		p.cancel(late)
 	}
-	p.cancel(small) // Timed out after wake but before consuming the reservation.
-	if p.Used() != 8 {
-		t.Fatal("cancelled grant leaked")
-	}
-	p.release(6)
+	p.cancel(large)
 	select {
-	case <-large.wake:
+	case <-small.wake:
 	default:
-		t.Fatal("large waiter not woken")
+		t.Fatal("cancelled grant not reassigned")
 	}
-	ok, _, _, next := p.reserveFor(8, false, nil, large)
-	if !ok || next != nil || p.Used() != 10 {
-		t.Fatal("consuming grant charged twice")
+	ok, _, _, next := p.reserveFor(2, false, nil, small)
+	if !ok || next != nil || p.Used() != 4 {
+		t.Fatalf("consuming grant charged twice: used%d", p.Used())
 	}
-	p.release(10)
+	p.release(4)
 	assertBudgetEmpty(t, p)
 }
 
-// A group slot must remain owned until its last unconsumed waiter grant is
-// cancelled, even if the buffer has already closed.
-func TestFairByteBudgetPendingGrantKeepsGroupRegistered(t *testing.T) {
-	p := fairPool(t, 8, 1)
-	g, err := p.register("tenant-a")
+func TestFairByteBudgetLargeWaiterCannotStarveBehindSmallGroup(t *testing.T) {
+	p, err := NewFairByteBudget(1000, FairByteBudgetOptions{ReserveBytes: 125, MinGroupBytes: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	p.reserveFor(8*testMsgSize, false, g, nil)
-	_, _, _, w := p.reserveFor(testMsgSize, false, g, nil)
-	p.releaseFor(testMsgSize, 0, g)
-	p.releaseFor(7*testMsgSize, 0, g)
-	p.unregister(g)
-	if _, err := p.register("tenant-b"); err == nil {
-		t.Fatal("pending waiter lost its group slot")
+	a, _ := p.register("parked")
+	largeGroup, _ := p.register("large")
+	smallGroup, _ := p.register("small")
+	if ok, _, _, _ := p.reserveFor(875, false, a, nil); !ok {
+		t.Fatal("base fill")
 	}
-	p.cancel(w)
-	// The waiter was the group's last owner; no caller can touch g afterwards.
-	b := groupedBuffer(t, p, "tenant-b")
-	b.Close()
+	if ok, _, _, _ := p.reserveFor(125, false, smallGroup, nil); !ok {
+		t.Fatal("runway fill")
+	}
+	_, _, _, large := p.reserveFor(100, false, largeGroup, nil)
+	_, _, _, small := p.reserveFor(1, false, smallGroup, nil)
+	releases := 0
+	for ; releases < 250; releases++ {
+		p.releaseFor(1, 0, smallGroup)
+		select {
+		case <-large.wake:
+			goto granted
+		default:
+		}
+		select {
+		case <-small.wake:
+			if ok, _, _, _ := p.reserveFor(1, false, smallGroup, small); !ok {
+				t.Fatal("small grant not consumable")
+			}
+			_, _, _, small = p.reserveFor(1, false, smallGroup, nil)
+		default:
+		}
+	}
+	t.Fatal("large waiter starved")
+granted:
+	if large.credit != 100 {
+		t.Fatal("large request woke incomplete")
+	}
+	if releases > 200 {
+		t.Fatalf("large request waited%d turns", releases)
+	}
+	p.cancel(small)
+	if ok, _, _, _ := p.reserveFor(100, false, largeGroup, large); !ok {
+		t.Fatal("large grant not consumable")
+	}
+	p.releaseFor(100, 0, largeGroup)
+	p.releaseFor(875, 0, a)
+	p.releaseFor(smallGroup.used, 0, smallGroup)
+	p.unregister(a)
+	p.unregister(largeGroup)
+	p.unregister(smallGroup)
 	assertBudgetEmpty(t, p)
 }
 
-// Concurrent ACKs, timeout/close races and repeated reuse of the same group
-// exercise reservation ownership without relying on timing to observe a leak.
+func TestFairByteBudgetPendingGrantKeepsGroupRegistered(t *testing.T) {
+	p := fairPool(t, 8, 1)
+	g, _ := p.register("tenant-a")
+	p.reserveFor(7*testMsgSize, false, g, nil)
+	_, _, _, w := p.reserveFor(testMsgSize, false, g, nil)
+	p.releaseFor(testMsgSize, 0, g)
+	p.releaseFor(6*testMsgSize, 0, g)
+	p.unregister(g)
+	if p.groups["tenant-a"] != g {
+		t.Fatal("pending grant lost its group")
+	}
+	other, err := p.register("tenant-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.unregister(other)
+	p.cancel(w)
+	assertBudgetEmpty(t, p)
+}
+
 func TestFairByteBudgetConcurrentTenantLifecycle(t *testing.T) {
-	p := fairPool(t, 32, 8)
+	p := fairPool(t, 32, 4)
 	var wg sync.WaitGroup
 	for tenant := 0; tenant < 8; tenant++ {
 		wg.Add(1)
@@ -253,11 +379,7 @@ func TestFairByteBudgetFailedClientCreationReleasesGroup(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
 	defer server.Close()
 	for i := 0; i < 3; i++ {
-		_, err := NewClient(context.Background(), ClientOptions{
-			Identity:      Identity{Oid: uuid.NewString(), InstallationKey: "iid"},
-			DestURL:       "ws" + strings.TrimPrefix(server.URL, "http") + "/usp",
-			BufferOptions: AckBufferOptions{SharedBudget: p, BudgetGroup: fmt.Sprint(i)},
-		})
+		_, err := NewClient(context.Background(), ClientOptions{Identity: Identity{Oid: uuid.NewString(), InstallationKey: "iid"}, DestURL: "ws" + strings.TrimPrefix(server.URL, "http") + "/usp", BufferOptions: AckBufferOptions{SharedBudget: p, BudgetGroup: fmt.Sprint(i)}})
 		if err == nil {
 			t.Fatal("refused connection succeeded")
 		}
@@ -265,18 +387,15 @@ func TestFairByteBudgetFailedClientCreationReleasesGroup(t *testing.T) {
 	}
 }
 
-// A grant can arrive just before another Add consumes this buffer's last
-// count/byte slot. Returning a closed grant channel here would busy-loop.
 func TestByteBudgetGrantCancelledWhenLocalLimitWins(t *testing.T) {
 	for _, kind := range []string{"count", "bytes"} {
 		t.Run(kind, func(t *testing.T) {
 			p := fairPool(t, 8, 1)
 			b := groupedBuffer(t, p, "tenant-a")
-			m := flaggedTestMessage()
-			if !b.Add(m, time.Second) {
+			if !b.Add(flaggedTestMessage(), time.Second) {
 				t.Fatal("initial add")
 			}
-			p.reserveFor(7*testMsgSize, false, b.group, nil)
+			p.reserveFor(6*testMsgSize, false, b.group, nil)
 			_, _, _, w := p.reserveFor(testMsgSize, false, b.group, nil)
 			p.releaseFor(testMsgSize, 0, b.group)
 			select {
@@ -293,14 +412,135 @@ func TestByteBudgetGrantCancelledWhenLocalLimitWins(t *testing.T) {
 			ok, next := b.tryAddLocked(flaggedTestMessage(), testMsgSize, w)
 			b.Unlock()
 			if ok || next != nil {
-				t.Fatal("local limit retained unusable grant")
+				t.Fatal("local limit retained closed grant")
 			}
-			if p.Used() != 7*testMsgSize {
+			if p.Used() != 6*testMsgSize {
 				t.Fatal("local limit leaked grant")
 			}
-			p.releaseFor(6*testMsgSize, 0, b.group)
+			p.releaseFor(5*testMsgSize, 0, b.group)
 			b.Close()
 			assertBudgetEmpty(t, p)
 		})
+	}
+}
+
+func BenchmarkFairByteBudgetReserveReleaseContended(b *testing.B) {
+	p, err := NewFairByteBudget(1<<30, FairByteBudgetOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	var next atomic.Uint64
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		g, err := p.register(fmt.Sprint(next.Add(1)))
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer p.unregister(g)
+		for pb.Next() {
+			if ok, _, _, _ := p.reserveFor(1024, false, g, nil); !ok {
+				b.Fatal("unexpected pressure")
+			}
+			p.releaseFor(1024, 0, g)
+		}
+	})
+}
+
+// One released byte rotates through1000 queued groups. Cancel/requeue the
+// current owner so the next large head can retain that byte. This measures
+// group-head indexes under saturation rather than broadcasting1000 wakeups.
+func BenchmarkFairByteBudgetThousandWaitingGroups(b *testing.B) {
+	const groups = 1000
+	p, err := NewFairByteBudget(1<<20, FairByteBudgetOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	owner, _ := p.register("owner")
+	p.reserveFor(p.total-p.reserve, false, owner, nil)
+	gs := make([]*budgetGroup, groups)
+	ws := make([]*budgetWaiter, groups)
+	for i := range gs {
+		gs[i], _ = p.register(fmt.Sprint(i))
+		_, _, _, ws[i] = p.reserveFor(1<<20, false, gs[i], nil)
+	}
+	p.releaseFor(1, 0, owner)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		idx := i % groups
+		p.cancel(ws[idx])
+		_, _, _, ws[idx] = p.reserveFor(1<<20, false, gs[idx], nil)
+	}
+	b.StopTimer()
+	for i, w := range ws {
+		p.cancel(w)
+		p.unregister(gs[i])
+	}
+	p.releaseFor(owner.used, 0, owner)
+	p.unregister(owner)
+}
+
+func BenchmarkByteBudgetReserveReleaseContended(b *testing.B) {
+	p := NewByteBudget(1 << 30)
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			if ok, _, _, _ := p.reserveFor(1024, false, nil, nil); !ok {
+				b.Fatal("unexpected pressure")
+			}
+			p.release(1024)
+		}
+	})
+}
+
+func BenchmarkAckBufferFairBudgetContended(b *testing.B) {
+	p, err := NewFairByteBudget(1<<40, FairByteBudgetOptions{})
+	if err != nil {
+		b.Fatal(err)
+	}
+	var next atomic.Uint64
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		buf, err := NewAckBuffer(AckBufferOptions{SharedBudget: p, BudgetGroup: fmt.Sprint(next.Add(1))})
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer buf.Close()
+		buf.UpdateCapacity(1024)
+		m := jsonMsg()
+		for pb.Next() {
+			if !buf.Add(m, time.Second) {
+				b.Fatal("unexpected pressure")
+			}
+			n := buf.GetNextToDeliver(time.Second)
+			if err := buf.Ack(n.SeqNum); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// The global one-frame exception cannot make a group with oversized escaped
+// debt look empty when deciding who may enter the newcomer reserve.
+func TestFairByteBudgetEscapedDebtCountsTowardOwnEligibility(t *testing.T) {
+	p := fairPool(t, 64, 8)
+	borrower := groupedBuffer(t, p, "borrower")
+	for i := 0; i < 56; i++ {
+		if !borrower.Add(flaggedTestMessage(), time.Second) {
+			t.Fatal(i)
+		}
+	}
+	a := groupedBuffer(t, p, "escaped")
+	if !a.Add(textMsg(100*testMsgSize), time.Second) {
+		t.Fatal("escape rejected")
+	}
+	if a.Add(flaggedTestMessage(), 10*time.Millisecond) {
+		t.Fatal("oversized escaped group consumed newcomer reserve")
+	}
+	b := groupedBuffer(t, p, "healthy")
+	for i := 0; i < 8; i++ {
+		if !b.Add(flaggedTestMessage(), time.Second) {
+			t.Fatalf("healthy%d", i)
+		}
 	}
 }
