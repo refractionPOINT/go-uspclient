@@ -2,6 +2,8 @@ module github.com/refractionPOINT/go-uspclient
 
 go 1.27.1
 
+retract v1.6.18 // Unacknowledged buffers can cause an admission stall.
+
 require (
 	github.com/elastic/go-grok v0.3.1
 	github.com/google/uuid v1.6.0
