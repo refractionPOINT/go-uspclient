@@ -8,6 +8,41 @@ Golang USP Client
 - HTTP CONNECT proxy support for restricted networks
 - Flexible event mapping and transformation
 
+## Shared buffer budgets
+
+Clients can share a memory budget for messages awaiting backend acknowledgment.
+`NewByteBudget(total)` preserves the ungrouped shared cap. For processes serving
+multiple organizations, use a fair budget and a trusted organization identifier:
+
+```go
+pool, err := uspclient.NewFairByteBudget(1<<30, 4096)
+if err != nil {
+    return err
+}
+options.BufferOptions = uspclient.AckBufferOptions{
+    SharedBudget: pool,
+    BudgetGroup: authenticatedOrganizationID,
+    MaxBytes: 16 << 20, // optional cap for this client
+}
+```
+
+Each group has a protected floor of `total/(2*groupSlots)` bytes. Clients in the
+same group share that floor. The remaining bytes are available for borrowing.
+Unused slots' floors stay reserved, so an organization that joins after another
+organization fills the lendable pool can still admit a window of messages.
+Unacknowledged messages cannot be taken back from borrowers, which is why the
+number of groups is bounded before lending starts. A pool accepts at most
+`groupSlots` distinct groups; another client in an existing group needs no extra
+slot. Client creation returns an error for an empty group or exhausted group
+capacity. Close every client to return its bytes and release its group slot.
+`BudgetGroup` and `SharedBudget` are process-local and never serialized.
+
+The byte cap remains soft by at most one additional message per client: without
+a pending ACK request, a client may admit one flagged message even when its limit
+is full. These escape messages remain included in `Used()` but cannot consume
+other groups' protected floors. A floor smaller than one message cannot promise
+a multi-message window. Per-client count and byte limits still apply.
+
 ## Proxy Support
 The USP client supports connecting to LimaCharlie cloud through HTTP CONNECT proxies. This is useful in enterprise environments where direct internet access is restricted.
 

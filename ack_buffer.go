@@ -34,6 +34,11 @@ type AckBufferOptions struct {
 	// draw from (see NewByteBudget). nil means no shared budget. It is never
 	// serialized: it only makes sense inside one process.
 	SharedBudget *ByteBudget `json:"-" yaml:"-" msgpack:"-"`
+
+	// BudgetGroup identifies clients sharing one protected floor when using
+	// NewFairByteBudget. It must be nonempty for a fair budget, is ignored by
+	// NewByteBudget, and is never serialized. Set it from a trusted tenant ID.
+	BudgetGroup string `json:"-" yaml:"-" msgpack:"-"`
 }
 
 type AckBuffer struct {
@@ -63,6 +68,11 @@ type AckBuffer struct {
 	accounting bool
 	maxBytes   uint64
 	shared     *ByteBudget
+	group      *budgetGroup
+	registered bool
+	// At most one shared-budget escape message is pending: it requests an ACK.
+	escapeSeq   uint64
+	escapeBytes uint64
 	// sizes[i] is the estimated size of buff[i]; len(sizes) == nextIndexFree.
 	sizes []uint64
 	// bytes is what this buffer currently holds and has charged to the shared
@@ -84,6 +94,10 @@ type AckBuffer struct {
 }
 
 func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
+	group, err := o.SharedBudget.register(o.BudgetGroup)
+	if err != nil {
+		return nil, err
+	}
 	b := &AckBuffer{
 		buff:             make([]*protocol.DataMessage, initialCapacity),
 		ackEvery:         initialCapacity,
@@ -98,6 +112,8 @@ func NewAckBuffer(o AckBufferOptions) (*AckBuffer, error) {
 		onAck:            o.OnAck,
 		maxBytes:         o.MaxBytes,
 		shared:           o.SharedBudget,
+		group:            group,
+		registered:       group != nil,
 		accounting:       o.MaxBytes != 0 || o.SharedBudget != nil,
 	}
 	b.isAvailable.Set()
@@ -121,6 +137,10 @@ func (b *AckBuffer) Close() {
 	b.isRunning = false
 	b.isClosed = true
 	b.releaseAllLocked()
+	if b.registered {
+		b.shared.unregister(b.group)
+		b.registered = false
+	}
 	b.signalLocked()
 }
 
@@ -171,7 +191,8 @@ func (b *AckBuffer) signalLocked() {
 // budget. Must hold the lock.
 func (b *AckBuffer) releaseAllLocked() {
 	if b.bytes != 0 {
-		b.shared.release(b.bytes)
+		b.shared.releaseFor(b.bytes, b.escapeBytes, b.group)
+		b.escapeBytes = 0
 		b.bytes = 0
 	}
 }
@@ -226,13 +247,20 @@ func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
 		}()
 	}
 
+	var waiter *budgetWaiter
+	defer func() { b.shared.cancel(waiter) }()
 	for {
 		b.Lock()
 		if !b.isRunning {
 			b.Unlock()
 			return ErrorClosed
 		}
-		ok, poolWake := b.tryAddLocked(e, size)
+		ok, nextWaiter := b.tryAddLocked(e, size, waiter)
+		waiter = nextWaiter
+		var poolWake <-chan struct{}
+		if waiter != nil {
+			poolWake = waiter.wake
+		}
 		if ok {
 			b.Unlock()
 			return nil
@@ -278,9 +306,9 @@ func (b *AckBuffer) timeoutErr() error {
 }
 
 // tryAddLocked admits e if there is room. When it fails because the shared
-// budget is full it also returns a channel that is closed on the budget's next
-// release; the channel was obtained atomically with the failed reservation so
-// no release can be missed. Must hold the lock.
+// budget is full it returns an individual waiter. A grant reserves bytes
+// before waking that waiter; cancellation returns the reservation. Must hold
+// the buffer lock.
 //
 // Byte limits and ack requests. The backend only acknowledges messages that
 // carry AckRequested (plus a slow periodic ack), and the count-based rule sets
@@ -301,8 +329,9 @@ func (b *AckBuffer) timeoutErr() error {
 //     about 16 requests per limit's worth of data (not one per message).
 //     Below the half-way point (steady state, plenty of room) no extra acks
 //     are asked.
-func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64) (bool, <-chan struct{}) {
+func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64, waiter *budgetWaiter) (bool, *budgetWaiter) {
 	if !b.isAvailable.IsSet() {
+		b.shared.cancel(waiter)
 		return false, nil
 	}
 	forced := false
@@ -312,6 +341,7 @@ func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64) (bool, <-
 		if b.maxBytes != 0 {
 			if b.bytes+size > b.maxBytes {
 				if heldFlagged {
+					b.shared.cancel(waiter)
 					return false, nil
 				}
 				forced = true
@@ -321,11 +351,15 @@ func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64) (bool, <-
 			}
 		}
 		if b.shared != nil {
-			ok, overshot, used, wake := b.shared.reserve(size, !heldFlagged)
+			ok, overshot, used, wake := b.shared.reserveFor(size, !heldFlagged, b.group, waiter)
 			if !ok {
 				return false, wake
 			}
 			forced = forced || overshot
+			if overshot && b.group != nil {
+				b.escapeSeq = b.nextSeqNum
+				b.escapeBytes = size
+			}
 			if total := b.shared.Total(); total != 0 && 2*used >= total {
 				if step := total / pressureStepDivisor; pressureStep == 0 || step < pressureStep {
 					pressureStep = step
@@ -405,7 +439,12 @@ func (b *AckBuffer) Ack(seq uint64) error {
 			freed = b.bytes
 		}
 		b.bytes -= freed
-		b.shared.release(freed)
+		var escape uint64
+		if b.escapeBytes != 0 && b.escapeSeq-b.firstSeqNum <= indexAcked {
+			escape = b.escapeBytes
+			b.escapeBytes = 0
+		}
+		b.shared.releaseFor(freed, escape, b.group)
 	}
 	oldFree := b.nextIndexFree
 	copy(b.buff, b.buff[indexAcked+1:oldFree])
