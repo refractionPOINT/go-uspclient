@@ -228,12 +228,17 @@ func TestFairByteBudgetOptionsAndActiveLifecycle(t *testing.T) {
 
 // Byte credits reserve released memory for the large FIFO head. Smaller
 // requests in the same group cannot consume its credits or wake prematurely.
-func TestByteBudgetIndividualWaiterGrantsAndCancellation(t *testing.T) {
-	p := NewByteBudget(10)
-	p.reserveFor(10, false, nil, nil)
-	_, _, _, large := p.reserveFor(8, false, nil, nil)
-	_, _, _, small := p.reserveFor(2, false, nil, nil)
-	p.release(2)
+func TestFairByteBudgetIndividualWaiterGrantsAndCancellation(t *testing.T) {
+	// Keep this FIFO/credit test independent of newcomer reserve eligibility.
+	p, err := NewFairByteBudget(10, FairByteBudgetOptions{MinGroupBytes: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, _ := p.register("shared")
+	p.reserveFor(10, false, g, nil)
+	_, _, _, large := p.reserveFor(8, false, g, nil)
+	_, _, _, small := p.reserveFor(2, false, g, nil)
+	p.releaseFor(2, 0, g)
 	select {
 	case <-large.wake:
 		t.Fatal("incomplete large waiter woken")
@@ -247,13 +252,13 @@ func TestByteBudgetIndividualWaiterGrantsAndCancellation(t *testing.T) {
 	if large.credit != 2 || small.credit != 0 || p.Used() != 10 {
 		t.Fatal("released bytes were not escrowed")
 	}
-	p.release(6)
+	p.releaseFor(6, 0, g)
 	select {
 	case <-large.wake:
 	default:
 		t.Fatal("large grant incomplete")
 	}
-	if ok, _, _, late := p.reserveFor(1, false, nil, nil); ok {
+	if ok, _, _, late := p.reserveFor(1, false, g, nil); ok {
 		t.Fatal("late producer stole grant")
 	} else {
 		p.cancel(late)
@@ -264,11 +269,12 @@ func TestByteBudgetIndividualWaiterGrantsAndCancellation(t *testing.T) {
 	default:
 		t.Fatal("cancelled grant not reassigned")
 	}
-	ok, _, _, next := p.reserveFor(2, false, nil, small)
+	ok, _, _, next := p.reserveFor(2, false, g, small)
 	if !ok || next != nil || p.Used() != 4 {
 		t.Fatalf("consuming grant charged twice: used%d", p.Used())
 	}
-	p.release(4)
+	p.releaseFor(4, 0, g)
+	p.unregister(g)
 	assertBudgetEmpty(t, p)
 }
 

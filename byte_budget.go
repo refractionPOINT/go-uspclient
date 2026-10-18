@@ -48,6 +48,7 @@ type ByteBudget struct {
 	groups              map[string]*budgetGroup
 	active              uint64
 	legacy              budgetGroup
+	legacyWake          chan struct{} // Ungrouped callers retain broadcast-on-release admission.
 	waiting             list.List
 	reserveReady        list.List
 	blocked             groupHeap
@@ -175,7 +176,7 @@ func (bb *ByteBudget) Total() uint64 {
 	return bb.total
 }
 
-// Used includes held messages and partial or complete waiter reservations.
+// Used includes held messages and, for fair budgets, waiter reservations.
 func (bb *ByteBudget) Used() uint64 {
 	if bb == nil {
 		return 0
@@ -412,6 +413,23 @@ func (bb *ByteBudget) removeWaiterLocked(w *budgetWaiter) {
 func (bb *ByteBudget) reserveFor(n uint64, force bool, g *budgetGroup, w *budgetWaiter) (bool, bool, uint64, *budgetWaiter) {
 	bb.mu.Lock()
 	defer bb.mu.Unlock()
+	if !bb.fair {
+		// Preserve ungrouped admission exactly: no FIFO gate, escrow or grants.
+		// A large blocked request must leave room available to smaller requests.
+		fits := bb.total == 0 || (n <= bb.total && bb.used <= bb.total-n)
+		if fits || force {
+			bb.used += n
+			return true, !fits, bb.used, nil
+		}
+		if bb.legacyWake == nil {
+			bb.legacyWake = make(chan struct{})
+		}
+		if w == nil {
+			w = &budgetWaiter{}
+		}
+		w.wake = bb.legacyWake
+		return false, false, bb.used, w
+	}
 	g = bb.group(g)
 	if w != nil && w.granted {
 		g.pending--
@@ -419,7 +437,8 @@ func (bb *ByteBudget) reserveFor(n uint64, force bool, g *budgetGroup, w *budget
 		bb.unregisterLocked(g)
 		return true, false, bb.used, nil
 	}
-	if w != nil && force {
+	removed := w != nil && force
+	if removed {
 		bb.removeWaiterLocked(w)
 		w = nil
 	}
@@ -432,6 +451,9 @@ func (bb *ByteBudget) reserveFor(n uint64, force bool, g *budgetGroup, w *budget
 		bb.charge(n, g, escaped)
 		if g.waiters.Len() != 0 {
 			bb.refreshLocked(g)
+		}
+		if removed {
+			bb.scheduleLocked()
 		}
 		return true, !fits || escaped, bb.used, nil
 	}
@@ -447,7 +469,7 @@ func (bb *ByteBudget) reserveFor(n uint64, force bool, g *budgetGroup, w *budget
 	return false, false, bb.used, w
 }
 func (bb *ByteBudget) cancel(w *budgetWaiter) {
-	if bb == nil || w == nil {
+	if bb == nil || w == nil || !bb.fair {
 		return
 	}
 	bb.mu.Lock()
@@ -464,6 +486,13 @@ func (bb *ByteBudget) releaseFor(n, escape uint64, g *budgetGroup) {
 	defer bb.mu.Unlock()
 	g = bb.group(g)
 	bb.releaseLocked(n, escape, g)
+	if !bb.fair {
+		if bb.legacyWake != nil {
+			close(bb.legacyWake)
+			bb.legacyWake = nil
+		}
+		return
+	}
 	if g.waiters.Len() != 0 {
 		bb.refreshLocked(g)
 	}
