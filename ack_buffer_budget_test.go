@@ -487,16 +487,20 @@ func TestEstimateMessageSize(t *testing.T) {
 
 func TestByteBudgetReserveHugeRequestDoesNotOverflow(t *testing.T) {
 	pool := NewByteBudget(100)
-	if ok, _, _, wake := pool.reserve(^uint64(0), false); ok || wake == nil {
+	if ok, _, _, wake := pool.reserveFor(^uint64(0), false, nil, nil); ok || wake == nil {
 		t.Fatalf("a request larger than the pool must wait, got ok=%v wake=%v", ok, wake)
+	} else {
+		pool.cancel(wake)
 	}
-	if ok, _, _, _ := pool.reserve(60, false); !ok {
+	if ok, _, _, _ := pool.reserveFor(60, false, nil, nil); !ok {
 		t.Fatal("60/100 must fit")
 	}
-	if ok, _, _, _ := pool.reserve(41, false); ok {
+	if ok, _, _, waiter := pool.reserveFor(41, false, nil, nil); ok {
 		t.Fatal("101/100 must not fit")
+	} else {
+		pool.cancel(waiter)
 	}
-	if ok, overshot, _, _ := pool.reserve(500, true); !ok || !overshot {
+	if ok, overshot, _, _ := pool.reserveFor(500, true, nil, nil); !ok || !overshot {
 		t.Fatalf("a forced reserve must succeed and report the overshoot, got ok=%v overshot=%v", ok, overshot)
 	}
 	pool.release(1000) // over-release is clamped, never wraps
@@ -504,7 +508,7 @@ func TestByteBudgetReserveHugeRequestDoesNotOverflow(t *testing.T) {
 		t.Fatalf("used = %d, want 0", pool.Used())
 	}
 	unlimited := NewByteBudget(0)
-	if ok, _, _, _ := unlimited.reserve(1<<40, false); !ok {
+	if ok, _, _, _ := unlimited.reserveFor(1<<40, false, nil, nil); !ok {
 		t.Fatal("a zero-size budget means unlimited")
 	}
 }

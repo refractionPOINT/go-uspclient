@@ -1,6 +1,9 @@
 package uspclient
 
 import (
+	"container/heap"
+	"container/list"
+	"fmt"
 	"sync"
 
 	"github.com/refractionPOINT/go-uspclient/protocol"
@@ -24,42 +27,148 @@ const (
 	jsonDeepPenaltyBytes = 4096
 )
 
-// ByteBudget is a process-wide pool of bytes that many clients draw from, so
-// that a shared host running many clients has a hard overall bound on the
-// memory held in unacknowledged messages regardless of how many clients exist
-// or how fast any one of them is fed.
+// ByteBudget limits estimated unacknowledged bytes shared by clients. Always
+// Close clients to return their charges. Without a pending ACK request, each
+// client may admit one additional flagged message to avoid deadlock; Used
+// includes these escape messages. A nil budget means unlimited.
 //
-// Share one *ByteBudget between clients through AckBufferOptions.SharedBudget.
-// The budget is a soft cap in exactly one way: a client that holds no message
-// with an ack request pending (in particular one that holds nothing) is always
-// allowed to admit one message, flagged with AckRequested, so a message larger
-// than the whole budget cannot deadlock its client and no client ever waits for
-// room without an ack on its way. The worst-case overshoot is therefore one
-// message per client.
-//
-// A client's share is returned to the budget as its messages are acked and in
-// full when the client is closed, so always Close() clients that use one.
-// When the budget is full, blocked Ship calls are all woken on every release
-// and race for the freed room; this only happens under saturation.
-//
-// A nil *ByteBudget is valid and means "no budget".
+// NewFairByteBudget also keeps a bounded newcomer reserve. Borrowers can use
+// total-reserve bytes; the remainder admits only groups below their current
+// fair share. This is newcomer runway, not an unconditional floor: parked,
+// non-revocable messages can exhaust any finite reserve after enough arrivals.
+// Progress beyond the one-message escape requires eligible bytes to be released.
+// Waiters receive individual grants, with FIFO order inside each group and
+// round-robin byte credits between groups. Large requests accumulate credits
+// instead of losing every release to smaller requests.
 type ByteBudget struct {
-	mu    sync.Mutex
-	total uint64
-	used  uint64
-	// wake is closed and nilled on every release. It is created lazily by the
-	// first reservation that fails, so a budget with no contention allocates
-	// nothing per operation.
-	wake chan struct{}
+	mu                  sync.Mutex
+	total, used, escape uint64
+	fair                bool
+	reserve, minGroup   uint64
+	groups              map[string]*budgetGroup
+	active              uint64
+	legacy              budgetGroup
+	legacyWake          chan struct{} // Ungrouped callers retain broadcast-on-release admission.
+	waiting             list.List
+	reserveReady        list.List
+	blocked             groupHeap
 }
 
-// NewByteBudget creates a budget of total bytes. total == 0 means unlimited
-// (usage is still tracked).
+// FairByteBudgetOptions configures bounded newcomer runway, not a permanent
+// reservation per registered client. All state remains inside this process.
+type FairByteBudgetOptions struct {
+	// ReserveBytes defaults to total/8. It must be smaller than total.
+	ReserveBytes uint64
+	// MinGroupBytes is the minimum eligibility threshold inside the reserve;
+	// zero defaults to the estimated overhead of one empty message (256 bytes).
+	// It does not override the shared cap or guarantee that space is available.
+	MinGroupBytes uint64
+}
+
+type budgetGroup struct {
+	key                         string
+	refs, used, escape, pending uint64
+	active                      bool
+	waiters                     list.List
+	allElem, reserveElem        *list.Element
+	heapIndex                   int
+}
+
+type budgetWaiter struct {
+	n, credit uint64
+	group     *budgetGroup
+	wake      chan struct{}
+	elem      *list.Element
+	granted   bool
+}
+
+type groupHeap []*budgetGroup
+
+func (h groupHeap) Len() int           { return len(h) }
+func (h groupHeap) Less(i, j int) bool { return groupNeed(h[i]) < groupNeed(h[j]) }
+func (h groupHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i]; h[i].heapIndex = i; h[j].heapIndex = j }
+func (h *groupHeap) Push(v interface{}) {
+	g := v.(*budgetGroup)
+	g.heapIndex = len(*h)
+	*h = append(*h, g)
+}
+func (h *groupHeap) Pop() interface{} {
+	a := *h
+	g := a[len(a)-1]
+	a[len(a)-1] = nil
+	*h = a[:len(a)-1]
+	g.heapIndex = -1
+	return g
+}
+
+// NewByteBudget creates an ungrouped budget. Zero means unlimited.
 func NewByteBudget(total uint64) *ByteBudget {
-	return &ByteBudget{total: total}
+	return &ByteBudget{total: total, legacy: budgetGroup{heapIndex: -1}}
 }
 
-// Total returns the size of the budget (0 = unlimited).
+// NewFairByteBudget creates an organization-aware shared budget. There is no
+// group-count limit and registering another group cannot fail for lack of
+// slots. Only groups holding bytes or waiters count toward the fair share.
+func NewFairByteBudget(total uint64, o FairByteBudgetOptions) (*ByteBudget, error) {
+	if o.ReserveBytes == 0 {
+		o.ReserveBytes = total / 8
+	}
+	if (total == 0 && o.ReserveBytes != 0) || (total != 0 && o.ReserveBytes >= total) {
+		return nil, fmt.Errorf("fair byte budget reserve must be smaller than total")
+	}
+	if o.MinGroupBytes == 0 {
+		o.MinGroupBytes = messageOverheadBytes
+	}
+	bb := NewByteBudget(total)
+	bb.fair = true
+	bb.reserve = o.ReserveBytes
+	bb.minGroup = o.MinGroupBytes
+	bb.groups = make(map[string]*budgetGroup)
+	return bb, nil
+}
+
+func (bb *ByteBudget) register(key string) (*budgetGroup, error) {
+	if bb == nil || !bb.fair {
+		return nil, nil
+	}
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	if key == "" {
+		return nil, fmt.Errorf("fair byte budget requires BudgetGroup")
+	}
+	if g := bb.groups[key]; g != nil {
+		g.refs++
+		return g, nil
+	}
+	g := &budgetGroup{key: key, refs: 1, heapIndex: -1}
+	bb.groups[key] = g
+	return g, nil
+}
+func (bb *ByteBudget) unregister(g *budgetGroup) {
+	if bb == nil || g == nil {
+		return
+	}
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	bb.unregisterLocked(g)
+}
+func (bb *ByteBudget) unregisterLocked(g *budgetGroup) {
+	if !bb.fair || g == nil {
+		return
+	}
+	g.refs--
+	if g.refs == 0 {
+		delete(bb.groups, g.key)
+	}
+}
+func (bb *ByteBudget) group(g *budgetGroup) *budgetGroup {
+	if g == nil {
+		return &bb.legacy
+	}
+	return g
+}
+
+// Total returns the configured cap (zero means unlimited).
 func (bb *ByteBudget) Total() uint64 {
 	if bb == nil {
 		return 0
@@ -67,7 +176,7 @@ func (bb *ByteBudget) Total() uint64 {
 	return bb.total
 }
 
-// Used returns the bytes currently charged to the budget by all clients.
+// Used includes held messages and, for fair budgets, waiter reservations.
 func (bb *ByteBudget) Used() uint64 {
 	if bb == nil {
 		return 0
@@ -77,45 +186,317 @@ func (bb *ByteBudget) Used() uint64 {
 	return bb.used
 }
 
-// reserve tries to charge n bytes. When force is set and they do not fit, they
-// are charged anyway and overshot is true (used for the one-message minimum
-// guarantee, see AckBuffer.tryAddLocked). used is the budget usage after the
-// call. When it fails it returns a channel that is closed on the next release;
-// the channel is obtained under the same lock as the failed attempt, so a
-// release that happens right after the failure cannot be missed.
-func (bb *ByteBudget) reserve(n uint64, force bool) (ok, overshot bool, used uint64, wake <-chan struct{}) {
-	bb.mu.Lock()
-	defer bb.mu.Unlock()
-	// Written as a subtraction so a huge n cannot overflow the comparison.
-	if bb.total == 0 || (n <= bb.total && bb.used <= bb.total-n) {
+func (bb *ByteBudget) activateLocked(g *budgetGroup) {
+	if !bb.fair {
+		return
+	}
+	active := g.used != 0 || g.pending != 0
+	if active != g.active {
+		if active {
+			bb.active++
+		} else {
+			bb.active--
+		}
+		g.active = active
+	}
+}
+func (bb *ByteBudget) share(g *budgetGroup) uint64 {
+	n := bb.active
+	if !g.active {
+		n++
+	}
+	if n < 2 {
+		n = 2
+	}
+	share := bb.total / n
+	if share < bb.minGroup {
+		share = bb.minGroup
+	}
+	return share
+}
+func groupNeed(g *budgetGroup) uint64 {
+	w := g.waiters.Front().Value.(*budgetWaiter)
+	held := g.used
+	remaining := w.n - w.credit
+	if remaining > ^uint64(0)-held {
+		return ^uint64(0)
+	}
+	return held + remaining
+}
+func (bb *ByteBudget) fits(n uint64, g *budgetGroup) bool {
+	if bb.total == 0 {
+		return true
+	}
+	used := bb.used - bb.escape
+	if n > bb.total || used > bb.total-n {
+		return false
+	}
+	if !bb.fair || used+n <= bb.total-bb.reserve {
+		return true
+	}
+	share := bb.share(g)
+	held := g.used
+	return n <= share && held <= share-n
+}
+func (bb *ByteBudget) charge(n uint64, g *budgetGroup, escape bool) {
+	if !bb.fair {
 		bb.used += n
-		return true, false, bb.used, nil
+		return
 	}
-	if force {
-		bb.used += n
-		return true, true, bb.used, nil
+	g.used += n
+	bb.used += n
+	if escape {
+		g.escape += n
+		bb.escape += n
 	}
-	if bb.wake == nil {
-		bb.wake = make(chan struct{})
+	bb.activateLocked(g)
+}
+func (bb *ByteBudget) releaseLocked(n, escape uint64, g *budgetGroup) {
+	if !bb.fair {
+		if n > bb.used {
+			n = bb.used
+		}
+		bb.used -= n
+		return
 	}
-	return false, false, bb.used, bb.wake
+	if n > g.used {
+		n = g.used
+	}
+	if n > bb.used {
+		n = bb.used
+	}
+	g.used -= n
+	bb.used -= n
+	g.escape -= escape
+	bb.escape -= escape
+	bb.activateLocked(g)
 }
 
-// release returns n bytes and wakes everyone waiting for room.
-func (bb *ByteBudget) release(n uint64) {
+// refreshLocked updates only this group's head. The heap lets reserve-only
+// scheduling find newly eligible groups without rescanning every waiter.
+func (bb *ByteBudget) refreshLocked(g *budgetGroup) {
+	if g.waiters.Len() == 0 {
+		if g.allElem != nil {
+			bb.waiting.Remove(g.allElem)
+			g.allElem = nil
+		}
+		if g.reserveElem != nil {
+			bb.reserveReady.Remove(g.reserveElem)
+			g.reserveElem = nil
+		}
+		if g.heapIndex >= 0 {
+			heap.Remove(&bb.blocked, g.heapIndex)
+		}
+		return
+	}
+	if g.allElem == nil {
+		g.allElem = bb.waiting.PushBack(g)
+	}
+	eligible := !bb.fair || groupNeed(g) <= bb.share(g)
+	if eligible {
+		if g.heapIndex >= 0 {
+			heap.Remove(&bb.blocked, g.heapIndex)
+		}
+		if g.reserveElem == nil {
+			g.reserveElem = bb.reserveReady.PushBack(g)
+		}
+	} else {
+		if g.reserveElem != nil {
+			bb.reserveReady.Remove(g.reserveElem)
+			g.reserveElem = nil
+		}
+		if g.heapIndex < 0 {
+			heap.Push(&bb.blocked, g)
+		} else {
+			heap.Fix(&bb.blocked, g.heapIndex)
+		}
+	}
+}
+func (bb *ByteBudget) nextReserveLocked() *budgetGroup {
+	// Active-group departures can raise everyone's fair share. Promote only
+	// newly eligible heap heads; decreases are checked lazily before use.
+	for len(bb.blocked) != 0 {
+		g := bb.blocked[0]
+		if groupNeed(g) > bb.share(g) {
+			break
+		}
+		heap.Pop(&bb.blocked)
+		g.reserveElem = bb.reserveReady.PushBack(g)
+	}
+	for e := bb.reserveReady.Front(); e != nil; e = bb.reserveReady.Front() {
+		g := e.Value.(*budgetGroup)
+		if groupNeed(g) <= bb.share(g) {
+			return g
+		}
+		bb.refreshLocked(g)
+	}
+	return nil
+}
+
+const budgetQuantum = 64 << 10
+
+// scheduleLocked charges credits before waking their single owner. A large
+// head keeps partial credits while other groups take their turns. With no
+// eligible room it inspects group-head indexes, never all blocked Add calls.
+func (bb *ByteBudget) scheduleLocked() {
+	for bb.waiting.Len() != 0 {
+		used := bb.used - bb.escape
+		if bb.total != 0 && used >= bb.total {
+			return
+		}
+		var g *budgetGroup
+		base := uint64(0)
+		if bb.total == 0 {
+			base = ^uint64(0)
+		} else if used < bb.total-bb.reserve {
+			base = bb.total - bb.reserve - used
+		}
+		if base != 0 || !bb.fair {
+			g = bb.waiting.Front().Value.(*budgetGroup)
+		} else {
+			g = bb.nextReserveLocked()
+			if g == nil {
+				return
+			}
+		}
+		w := g.waiters.Front().Value.(*budgetWaiter)
+		room := base
+		if bb.total == 0 {
+			room = ^uint64(0)
+		} else if !bb.fair || groupNeed(g) <= bb.share(g) {
+			room = bb.total - used
+		}
+		credit := w.n - w.credit
+		if credit > budgetQuantum {
+			credit = budgetQuantum
+		}
+		if credit > room {
+			credit = room
+		}
+		if credit == 0 {
+			return
+		}
+		bb.charge(credit, g, false)
+		w.credit += credit
+		if w.credit == w.n {
+			g.waiters.Remove(w.elem)
+			w.elem = nil
+			w.granted = true
+			close(w.wake)
+		}
+		bb.refreshLocked(g)
+		if g.allElem != nil {
+			bb.waiting.MoveToBack(g.allElem)
+		}
+		if g.reserveElem != nil {
+			bb.reserveReady.MoveToBack(g.reserveElem)
+		}
+	}
+}
+
+func (bb *ByteBudget) removeWaiterLocked(w *budgetWaiter) {
+	g := w.group
+	if w.elem != nil {
+		g.waiters.Remove(w.elem)
+		w.elem = nil
+	}
+	if w.credit != 0 {
+		bb.releaseLocked(w.credit, 0, g)
+		w.credit = 0
+	}
+	g.pending--
+	bb.activateLocked(g)
+	bb.unregisterLocked(g)
+	bb.refreshLocked(g)
+}
+
+func (bb *ByteBudget) reserveFor(n uint64, force bool, g *budgetGroup, w *budgetWaiter) (bool, bool, uint64, *budgetWaiter) {
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	if !bb.fair {
+		// Preserve ungrouped admission exactly: no FIFO gate, escrow or grants.
+		// A large blocked request must leave room available to smaller requests.
+		fits := bb.total == 0 || (n <= bb.total && bb.used <= bb.total-n)
+		if fits || force {
+			bb.used += n
+			return true, !fits, bb.used, nil
+		}
+		if bb.legacyWake == nil {
+			bb.legacyWake = make(chan struct{})
+		}
+		if w == nil {
+			w = &budgetWaiter{}
+		}
+		w.wake = bb.legacyWake
+		return false, false, bb.used, w
+	}
+	g = bb.group(g)
+	if w != nil && w.granted {
+		g.pending--
+		bb.activateLocked(g)
+		bb.unregisterLocked(g)
+		return true, false, bb.used, nil
+	}
+	removed := w != nil && force
+	if removed {
+		bb.removeWaiterLocked(w)
+		w = nil
+	}
+	if w != nil {
+		return false, false, bb.used, w
+	}
+	fits := bb.fits(n, g)
+	if (fits && g.waiters.Len() == 0) || force {
+		escaped := bb.fair && (!fits || g.waiters.Len() != 0)
+		bb.charge(n, g, escaped)
+		if g.waiters.Len() != 0 {
+			bb.refreshLocked(g)
+		}
+		if removed {
+			bb.scheduleLocked()
+		}
+		return true, !fits || escaped, bb.used, nil
+	}
+	w = &budgetWaiter{n: n, group: g, wake: make(chan struct{})}
+	w.elem = g.waiters.PushBack(w)
+	g.pending++
+	if bb.fair {
+		g.refs++
+	}
+	bb.activateLocked(g)
+	bb.refreshLocked(g)
+	bb.scheduleLocked()
+	return false, false, bb.used, w
+}
+func (bb *ByteBudget) cancel(w *budgetWaiter) {
+	if bb == nil || w == nil || !bb.fair {
+		return
+	}
+	bb.mu.Lock()
+	defer bb.mu.Unlock()
+	bb.removeWaiterLocked(w)
+	bb.scheduleLocked()
+}
+func (bb *ByteBudget) release(n uint64) { bb.releaseFor(n, 0, nil) }
+func (bb *ByteBudget) releaseFor(n, escape uint64, g *budgetGroup) {
 	if bb == nil || n == 0 {
 		return
 	}
 	bb.mu.Lock()
 	defer bb.mu.Unlock()
-	if n > bb.used {
-		n = bb.used
+	g = bb.group(g)
+	bb.releaseLocked(n, escape, g)
+	if !bb.fair {
+		if bb.legacyWake != nil {
+			close(bb.legacyWake)
+			bb.legacyWake = nil
+		}
+		return
 	}
-	bb.used -= n
-	if bb.wake != nil {
-		close(bb.wake)
-		bb.wake = nil
+	if g.waiters.Len() != 0 {
+		bb.refreshLocked(g)
 	}
+	bb.scheduleLocked()
 }
 
 // estimateMessageSize returns a cheap estimate of the heap footprint of a

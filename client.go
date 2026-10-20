@@ -281,6 +281,7 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 	c.instanceID = uuid.NewString()
 	c.closeCtx, c.closeCancel = context.WithCancel(context.Background())
 	if err := c.connect(ctx); err != nil {
+		c.ab.Close()
 		c.closeCancel()
 		return nil, err
 	}

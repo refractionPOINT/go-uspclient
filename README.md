@@ -8,6 +8,65 @@ Golang USP Client
 - HTTP CONNECT proxy support for restricted networks
 - Flexible event mapping and transformation
 
+## Shared buffer budgets
+
+Clients can share a memory budget for messages awaiting backend acknowledgment.
+`NewByteBudget(total)` preserves ungrouped admission: any whole request that fits
+may proceed, with a shared wakeup on release and no FIFO or partial reservations.
+For processes serving multiple organizations, use a fair budget and a trusted
+organization identifier:
+
+```go
+pool, err := uspclient.NewFairByteBudget(1<<30, uspclient.FairByteBudgetOptions{})
+if err != nil {
+    return err
+}
+options.BufferOptions = uspclient.AckBufferOptions{
+    SharedBudget: pool,
+    BudgetGroup: authenticatedOrganizationID,
+    MaxBytes: 16 << 20, // optional cap for this client
+}
+```
+
+The byte-budget invariant is: "bounded newcomer runway, plus eventual fair turns as eligible bytes are released, plus the per-client one-frame escape (so no org is ever at zero progress)".
+
+`ReserveBytes` defaults to one eighth of the total. Any group can borrow from the
+other seven eighths. Inside the reserve, a group's projected usage must be at
+most `max(total/max(activeGroups, 2), MinGroupBytes)`. The minimum denominator of
+two prevents a lone borrower from consuming the entire reserve before another
+group arrives. Active groups hold bytes or waiters; idle registered clients do
+not count. `MinGroupBytes` defaults to 256 bytes, the estimated overhead of an
+empty message. It changes eligibility, without overriding the shared cap.
+Clients in the same group share accounting, so adding adapters cannot multiply
+a group's eligibility. There is no group-count cap or group-count-dependent
+client creation failure.
+
+This reserve offers bounded runway, not an immediate guaranteed floor for every
+arrival. For example, one parked group can hold seven eighths, a second can fill
+the reserve, and a third then has only its one-message escape until eligible
+bytes return. Unacknowledged messages cannot be reclaimed from borrowers.
+Blocked groups receive round-robin byte credits with FIFO order inside a group.
+Large requests retain partial credits so continuing small requests cannot steal
+all released memory. Timeout and Close return unused credits.
+
+Partial credits can fragment room with many large waiting groups. In a 4 MiB
+stress case, 56 groups requesting 128 KiB each completed four requests versus 32
+with legacy admission after the same releases; 3 MiB remained in partial credits.
+A changing active-group count can also reclassify every waiting group head under
+the shared lock: a three-operation boundary-oscillation cycle measured 4.2 µs at
+100 groups, 38 µs at 1,000, and 215 µs at 5,000 in independent review benchmarks.
+Neither behavior violates the byte cap, but both can delay progress. A lifecycle
+log sample observed at most 12 organizations per process; that is a lower-bound
+observation, not a group-count limit or a guarantee about unobserved workloads.
+
+The byte cap is soft by at most one additional message per client: without a
+pending ACK request, a client may admit one flagged message even when its byte
+limit is full. Escape messages stay included in `Used()`. In fair budgets they
+do not consume the normal newcomer reserve, but still count toward their own
+group's eligibility. Existing count-window and connection flow limits still
+apply. Close every client to return its bytes. `BudgetGroup` and `SharedBudget`
+are process-local and never serialized.
+
 ## Proxy Support
 The USP client supports connecting to LimaCharlie cloud through HTTP CONNECT proxies. This is useful in enterprise environments where direct internet access is restricted.
 
