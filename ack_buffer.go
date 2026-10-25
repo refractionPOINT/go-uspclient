@@ -42,6 +42,9 @@ type AckBufferOptions struct {
 }
 
 type AckBuffer struct {
+	// Metadata only for opted-in admissions; never a second replay/payload queue.
+	// Tokens point to the separate state cell, not these links or the buffer.
+	receiptHead, receiptTail *trackedAdmission
 	sync.RWMutex
 
 	isClosed    bool
@@ -224,6 +227,9 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 // add is Add with the reason for a failure: ErrorClosed when the buffer is (or
 // becomes) closed, ErrorBufferFull when the timeout expired (or e is nil).
 func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
+	return b.addWithReceipt(e, timeout, nil)
+}
+func (b *AckBuffer) addWithReceipt(e *protocol.DataMessage, timeout time.Duration, receipt *receiptState) error {
 	if e == nil {
 		return ErrorBufferFull
 	}
@@ -255,7 +261,7 @@ func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
 			b.Unlock()
 			return ErrorClosed
 		}
-		ok, nextWaiter := b.tryAddLocked(e, size, waiter)
+		ok, nextWaiter := b.tryAddWithReceiptLocked(e, size, waiter, receipt)
 		waiter = nextWaiter
 		var poolWake <-chan struct{}
 		if waiter != nil {
@@ -330,6 +336,9 @@ func (b *AckBuffer) timeoutErr() error {
 //     Below the half-way point (steady state, plenty of room) no extra acks
 //     are asked.
 func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64, waiter *budgetWaiter) (bool, *budgetWaiter) {
+	return b.tryAddWithReceiptLocked(e, size, waiter, nil)
+}
+func (b *AckBuffer) tryAddWithReceiptLocked(e *protocol.DataMessage, size uint64, waiter *budgetWaiter, receipt *receiptState) (bool, *budgetWaiter) {
 	if !b.isAvailable.IsSet() {
 		b.shared.cancel(waiter)
 		return false, nil
@@ -379,6 +388,16 @@ func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64, waiter *b
 	} else if b.accounting {
 		b.bytesSinceFlag += size
 	}
+	if receipt != nil {
+		entry := &trackedAdmission{seq: e.SeqNum, state: receipt}
+		if b.receiptTail == nil {
+			b.receiptHead = entry
+		} else {
+			b.receiptTail.next = entry
+		}
+		b.receiptTail = entry
+		receipt.state.Store(uint32(ReceiptRetained))
+	}
 	b.buff[b.nextIndexFree] = e
 	b.nextIndexFree++
 	if b.accounting {
@@ -427,6 +446,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		}
 	}
 
+	oldFirst := b.firstSeqNum
 	escapeIndex := b.escapeSeq - b.firstSeqNum
 	b.firstSeqNum = seq + 1
 	if b.accounting {
@@ -475,6 +495,7 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		b.isReadyToDeliver.Clear()
 		b.isEmpty.Set()
 	}
+	b.ackReceiptsLocked(oldFirst, indexAcked)
 	return nil
 }
 
