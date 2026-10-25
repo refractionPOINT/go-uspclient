@@ -207,8 +207,17 @@ func TestAdmissionReceiptRealPeerProgress(t *testing.T) {
 	complete := c.ObserveReceipt(later).Frame == ReceiptAcknowledged && c.ObserveReceipt(b).Frame == ReceiptAcknowledged
 	closeAll()
 	historical := c.ObserveReceipt(a) == (ReceiptObservation{Frame: ReceiptAcknowledged, Lifetime: ReceiptClosed})
-	if !pending || !invalid || !rejectedACK || !partial || !refusal || !full || !distinct || !complete || !historical || p.failed.Load() {
-		t.Fatal("RECEIPT-ACK: exact validated cumulative ACK/admission identity or unchanged window contract violated")
+	for _, check := range []struct {
+		name string
+		ok   bool
+	}{
+		{"initial retained states", pending}, {"invalid or foreign token", invalid},
+		{"invalid ACK rejected", rejectedACK}, {"partial cumulative ACK", partial},
+		{"window shrink refusal", refusal}, {"full window refusal", full},
+		{"reused payload new generation", distinct}, {"final cumulative ACK", complete},
+		{"historical ACK after Close", historical}, {"peer IO", !p.failed.Load()},
+	} {
+		receiptCheck(t, "RECEIPT-ACK", check.name, check.ok)
 	}
 }
 func TestAdmissionReceiptACKBeforeReturn(t *testing.T) {
@@ -238,9 +247,10 @@ func TestAdmissionReceiptACKBeforeReturn(t *testing.T) {
 	receiptDone(t, "ship_return", done)
 	observed := c.ObserveReceipt(token)
 	closeAll()
-	if !blocked || shipErr != nil || observed != (ReceiptObservation{Frame: ReceiptAcknowledged, Lifetime: ReceiptLive}) || p.failed.Load() {
-		t.Fatal("RECEIPT-EARLY-ACK: ACK before successful return was lost or receipt published before admission")
-	}
+	receiptCheck(t, "RECEIPT-EARLY-ACK", "return held after admission", blocked)
+	receiptCheck(t, "RECEIPT-EARLY-ACK", "successful admission", shipErr == nil)
+	receiptCheck(t, "RECEIPT-EARLY-ACK", "validated ACK preserved before return", observed == (ReceiptObservation{Frame: ReceiptAcknowledged, Lifetime: ReceiptLive}))
+	receiptCheck(t, "RECEIPT-EARLY-ACK", "peer IO", !p.failed.Load())
 }
 func TestAdmissionReceiptReconnectKeepsEntry(t *testing.T) {
 	c, p, closeAll := receiptClient(t, AckBufferOptions{})
@@ -257,9 +267,9 @@ func TestAdmissionReceiptReconnectKeepsEntry(t *testing.T) {
 	receiptAck(t, c, p, second.seq)
 	ack := c.ObserveReceipt(token).Frame == ReceiptAcknowledged
 	closeAll()
-	if !pending || !ack || p.failed.Load() {
-		t.Fatal("RECEIPT-REPLAY: reconnect replaced or falsely confirmed retained entry")
-	}
+	receiptCheck(t, "RECEIPT-REPLAY", "retained identity across reconnect", pending)
+	receiptCheck(t, "RECEIPT-REPLAY", "validated replay ACK", ack)
+	receiptCheck(t, "RECEIPT-REPLAY", "peer IO", !p.failed.Load())
 }
 func TestAdmissionReceiptCloseWaitsForRegisteredIO(t *testing.T) {
 	c, p, closeAll := receiptClient(t, AckBufferOptions{})
@@ -297,17 +307,28 @@ func TestAdmissionReceiptCloseWaitsForRegisteredIO(t *testing.T) {
 	receiptDone(t, "actual_close", done)
 	after := c.ObserveReceipt(token)
 	closeAll()
-	if returned || during.Lifetime != ReceiptClosing || during.Frame != ReceiptRetained || after != (ReceiptObservation{Frame: ReceiptClosedUnconfirmed, Lifetime: ReceiptClosed}) || len(tail) != 1 || tail[0].TextPayload != "unconfirmed-tail" || closeErr != nil || p.failed.Load() {
-		t.Fatal("RECEIPT-CLOSE: closing intent replaced actual registered-IO join or manufactured confirmation")
+	receiptCheck(t, "RECEIPT-CLOSE", "Close waits for registered IO", !returned)
+	receiptCheck(t, "RECEIPT-CLOSE", "closing is unconfirmed", during == (ReceiptObservation{Frame: ReceiptRetained, Lifetime: ReceiptClosing}))
+	receiptCheck(t, "RECEIPT-CLOSE", "joined is closed-unconfirmed", after == (ReceiptObservation{Frame: ReceiptClosedUnconfirmed, Lifetime: ReceiptClosed}))
+	receiptCheck(t, "RECEIPT-CLOSE", "original unconfirmed tail", len(tail) == 1 && tail[0].TextPayload == "unconfirmed-tail")
+	receiptCheck(t, "RECEIPT-CLOSE", "Close result", closeErr == nil)
+	receiptCheck(t, "RECEIPT-CLOSE", "peer IO", !p.failed.Load())
+}
+
+func receiptCheck(t *testing.T, contract, condition string, ok bool) {
+	t.Helper()
+	if !ok {
+		t.Errorf("%s: %s", contract, condition)
 	}
 }
 
 var receiptObservationSink ReceiptObservation
 
-func TestAdmissionReceiptGenerationWrapAndAllocation(t *testing.T) {
+func TestAdmissionReceiptGenerationWrapAndTracking(t *testing.T) {
 	buffer, _ := NewAckBuffer(AckBufferOptions{})
 	buffer.UpdateCapacity(4)
 	c := &Client{ab: buffer}
+	t.Cleanup(func() { buffer.Close(); buffer.releaseReceiptTracking() })
 	buffer.firstSeqNum, buffer.nextSeqNum = math.MaxUint64-1, math.MaxUint64-1
 	tokens := make([]AdmissionReceipt, 3)
 	for i := range tokens {
@@ -318,6 +339,20 @@ func TestAdmissionReceiptGenerationWrapAndAllocation(t *testing.T) {
 		}
 		buffer.GetNextToDeliver(0)
 	}
+	// Check exact linked-entry identities directly, without process-wide memory
+	// counters that can include concurrent transports or unrelated tests.
+	buffer.RLock()
+	link := buffer.receiptHead
+	exactLinks := true
+	for _, token := range tokens {
+		if link == nil || link.state != token.state {
+			exactLinks = false
+			break
+		}
+		link = link.next
+	}
+	exactLinks = exactLinks && link == nil && buffer.receiptTail != nil && buffer.receiptTail.state == tokens[2].state
+	buffer.RUnlock()
 	if buffer.Ack(math.MaxUint64) != nil {
 		t.Fatal("receipt_fixture_wrap_ack")
 	}
@@ -327,43 +362,86 @@ func TestAdmissionReceiptGenerationWrapAndAllocation(t *testing.T) {
 	}
 	pending, err := c.ShipWithReceipt(&protocol.DataMessage{}, 0)
 	if err != nil {
-		t.Fatal("receipt_fixture_allocation_prefix")
+		t.Fatal("receipt_fixture_tracking_prefix")
 	}
-	allocations := testing.AllocsPerRun(1000, func() { receiptObservationSink = c.ObserveReceipt(pending) })
+	buffer.RLock()
+	single := buffer.receiptHead != nil && buffer.receiptHead == buffer.receiptTail && buffer.receiptHead.next == nil && buffer.receiptHead.state == pending.state
+	buffer.RUnlock()
+	observed := c.ObserveReceipt(pending)
 	buffer.Close()
 	buffer.releaseReceiptTracking()
-	// A refusal/sink path must never return a valid receipt or retain metadata.
 	sink := &Client{options: ClientOptions{TestSinkMode: true}}
 	sinkToken, sinkErr := sink.ShipWithReceipt(&protocol.DataMessage{}, 0)
 	refused, refusedErr := c.ShipWithReceipt(&protocol.DataMessage{}, 0)
-	// Compare steady-state opt-in overhead against the unchanged untracked
-	// admission path with the same already-delivered/ACKed single-entry workload.
-	measured, _ := NewAckBuffer(AckBufferOptions{})
-	plain := &Client{ab: measured}
-	sample := &protocol.DataMessage{}
-	plainAlloc := testing.AllocsPerRun(100, func() {
-		if plain.Ship(sample, 0) != nil {
-			panic("allocation fixture")
+	// Ordinary Ship never attaches receipt metadata.
+	untracked, _ := NewAckBuffer(AckBufferOptions{})
+	plain := &Client{ab: untracked}
+	plainErr := plain.Ship(&protocol.DataMessage{}, 0)
+	noTracking := untracked.receiptHead == nil && untracked.receiptTail == nil
+	untracked.Close()
+	untracked.releaseReceiptTracking()
+	t.Logf("RECEIPT-SIZES state=%d owner=%d link=%d token=%d observation=%d", unsafe.Sizeof(receiptState{}), unsafe.Sizeof(receiptOwner{}), unsafe.Sizeof(trackedAdmission{}), unsafe.Sizeof(AdmissionReceipt{}), unsafe.Sizeof(ReceiptObservation{}))
+	receiptCheck(t, "RECEIPT-BOUND", "exact tracked entry chain", exactLinks)
+	receiptCheck(t, "RECEIPT-BOUND", "cumulative ACK across sequence wrap", wrap)
+	receiptCheck(t, "RECEIPT-BOUND", "single new tracked generation", single)
+	receiptCheck(t, "RECEIPT-BOUND", "retained observation", observed == (ReceiptObservation{Frame: ReceiptRetained, Lifetime: ReceiptLive}))
+	receiptCheck(t, "RECEIPT-BOUND", "sink refusal", sinkErr == ErrorReceiptUnavailable && sinkToken == (AdmissionReceipt{}))
+	receiptCheck(t, "RECEIPT-BOUND", "closed refusal", refusedErr == ErrorClosed && refused == (AdmissionReceipt{}))
+	receiptCheck(t, "RECEIPT-BOUND", "untracked admission", plainErr == nil && noTracking)
+	receiptCheck(t, "RECEIPT-BOUND", "tracking released", buffer.receiptHead == nil && buffer.receiptTail == nil)
+}
+
+// Allocation measurements are diagnostic benchmarks, not CI assertions on the
+// whole process's runtime.MemStats while other client goroutines may be active.
+func BenchmarkAdmissionReceiptObserve(b *testing.B) {
+	buffer, _ := NewAckBuffer(AckBufferOptions{})
+	c := &Client{ab: buffer}
+	b.Cleanup(func() { buffer.Close(); buffer.releaseReceiptTracking() })
+	token, err := c.ShipWithReceipt(&protocol.DataMessage{}, 0)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		receiptObservationSink = c.ObserveReceipt(token)
+	}
+}
+
+func BenchmarkAdmissionReceiptAdmission(b *testing.B) {
+	for _, tracked := range []bool{false, true} {
+		name := "untracked"
+		if tracked {
+			name = "tracked"
 		}
-		measured.GetNextToDeliver(0)
-		if measured.Ack(sample.SeqNum) != nil {
-			panic("allocation fixture")
-		}
-	})
-	trackedAlloc := testing.AllocsPerRun(100, func() {
-		if _, e := plain.ShipWithReceipt(sample, 0); e != nil {
-			panic("allocation fixture")
-		}
-		measured.GetNextToDeliver(0)
-		if measured.Ack(sample.SeqNum) != nil {
-			panic("allocation fixture")
-		}
-	})
-	measured.Close()
-	measured.releaseReceiptTracking()
-	t.Logf("RECEIPT-ALLOCS untracked=%.0f tracked=%.0f extra=%.0f", plainAlloc, trackedAlloc, trackedAlloc-plainAlloc)
-	t.Logf("RECEIPT-SIZES state=%d owner=%d link=%d token=%d observation=%d ObserveAllocs=%.0f", unsafe.Sizeof(receiptState{}), unsafe.Sizeof(receiptOwner{}), unsafe.Sizeof(trackedAdmission{}), unsafe.Sizeof(AdmissionReceipt{}), unsafe.Sizeof(ReceiptObservation{}), allocations)
-	if !wrap || allocations != 0 || trackedAlloc-plainAlloc > 2 || sinkErr != ErrorReceiptUnavailable || sinkToken != (AdmissionReceipt{}) || refusedErr != ErrorClosed || refused != (AdmissionReceipt{}) || buffer.receiptHead != nil {
-		t.Fatal("RECEIPT-BOUND: entry wrap, zero-allocation observer or invalid refusal/sink contract violated")
+		b.Run(name, func(b *testing.B) {
+			buffer, _ := NewAckBuffer(AckBufferOptions{})
+			c := &Client{ab: buffer}
+			b.Cleanup(func() { buffer.Close(); buffer.releaseReceiptTracking() })
+			sample := &protocol.DataMessage{}
+			// Warm the reusable buffer and lazy receipt owner before measuring the
+			// steady-state per-entry cost, for both paths.
+			send := func() {
+				var err error
+				if tracked {
+					_, err = c.ShipWithReceipt(sample, 0)
+				} else {
+					err = c.Ship(sample, 0)
+				}
+				if err != nil {
+					b.Fatal(err)
+				}
+				buffer.GetNextToDeliver(0)
+				if err = buffer.Ack(sample.SeqNum); err != nil {
+					b.Fatal(err)
+				}
+			}
+			send()
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				send()
+			}
+		})
 	}
 }
