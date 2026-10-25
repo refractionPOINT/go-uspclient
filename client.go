@@ -34,9 +34,12 @@ import (
 var certsGoogleWr3 []byte
 
 type Client struct {
-	options ClientOptions
-	org     *lc.Organization
-	wssURL  string
+	receiptMu       sync.Mutex
+	receiptOwner    atomic.Pointer[receiptOwner]
+	receiptLifetime ReceiptLifetime // receiptMu; zero means not closing yet
+	options         ClientOptions
+	org             *lc.Organization
+	wssURL          string
 
 	conn           *websocket.Conn
 	ab             *AckBuffer
@@ -351,6 +354,7 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 	// Stop any background reconnect loop first: it holds no lock while it
 	// sleeps between attempts, so disconnect() below cannot see it.
 	c.isClosing.Store(true)
+	c.setReceiptLifetime(ReceiptClosing)
 	if c.closeCancel != nil {
 		c.closeCancel()
 	}
@@ -362,6 +366,10 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 		err = err2
 	}
 	c.setLastError(err)
+	// disconnect joined the registered transport workers; no new worker may
+	// start after isClosing. Detach metadata without scanning retained payloads.
+	c.ab.releaseReceiptTracking()
+	c.setReceiptLifetime(ReceiptClosed)
 	return messages, err
 }
 
