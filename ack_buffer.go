@@ -45,6 +45,13 @@ type AckBuffer struct {
 	// Metadata only for opted-in admissions; never a second replay/payload queue.
 	// Tokens point to the separate state cell, not these links or the buffer.
 	receiptHead, receiptTail *trackedAdmission
+	// deliverCursor is the first tracked entry at or after nextIndexToDeliver,
+	// so a handoff finds its frame's opt-in limit in O(1) amortized.
+	deliverCursor *trackedAdmission
+	// retired holds the sequence numbers of retired slots still in buff. It is
+	// allocated by the first retirement only, and its entries leave with their
+	// slots; buffers that never opt in never touch it.
+	retired map[uint64]struct{}
 	sync.RWMutex
 
 	isClosed    bool
@@ -164,7 +171,7 @@ func (b *AckBuffer) drain(ctx context.Context) error {
 			err = ErrorClosed
 		}
 		if err != nil {
-			e := &DrainError{Unacked: int(b.nextIndexFree), FirstSeq: b.buff[0].SeqNum,
+			e := &DrainError{Unacked: int(b.nextIndexFree) - len(b.retired), FirstSeq: b.buff[0].SeqNum,
 				LastSeq: b.buff[b.nextIndexFree-1].SeqNum, Err: err}
 			b.Unlock()
 			return e
@@ -227,9 +234,9 @@ func (b *AckBuffer) Add(e *protocol.DataMessage, timeout time.Duration) bool {
 // add is Add with the reason for a failure: ErrorClosed when the buffer is (or
 // becomes) closed, ErrorBufferFull when the timeout expired (or e is nil).
 func (b *AckBuffer) add(e *protocol.DataMessage, timeout time.Duration) error {
-	return b.addWithReceipt(e, timeout, nil)
+	return b.addWithReceipt(e, timeout, nil, 0)
 }
-func (b *AckBuffer) addWithReceipt(e *protocol.DataMessage, timeout time.Duration, receipt *receiptState) error {
+func (b *AckBuffer) addWithReceipt(e *protocol.DataMessage, timeout time.Duration, receipt *receiptState, maxTransmissions uint32) error {
 	if e == nil {
 		return ErrorBufferFull
 	}
@@ -261,7 +268,7 @@ func (b *AckBuffer) addWithReceipt(e *protocol.DataMessage, timeout time.Duratio
 			b.Unlock()
 			return ErrorClosed
 		}
-		ok, nextWaiter := b.tryAddWithReceiptLocked(e, size, waiter, receipt)
+		ok, nextWaiter := b.tryAddWithReceiptLocked(e, size, waiter, receipt, maxTransmissions)
 		waiter = nextWaiter
 		var poolWake <-chan struct{}
 		if waiter != nil {
@@ -336,9 +343,9 @@ func (b *AckBuffer) timeoutErr() error {
 //     Below the half-way point (steady state, plenty of room) no extra acks
 //     are asked.
 func (b *AckBuffer) tryAddLocked(e *protocol.DataMessage, size uint64, waiter *budgetWaiter) (bool, *budgetWaiter) {
-	return b.tryAddWithReceiptLocked(e, size, waiter, nil)
+	return b.tryAddWithReceiptLocked(e, size, waiter, nil, 0)
 }
-func (b *AckBuffer) tryAddWithReceiptLocked(e *protocol.DataMessage, size uint64, waiter *budgetWaiter, receipt *receiptState) (bool, *budgetWaiter) {
+func (b *AckBuffer) tryAddWithReceiptLocked(e *protocol.DataMessage, size uint64, waiter *budgetWaiter, receipt *receiptState, maxTransmissions uint32) (bool, *budgetWaiter) {
 	if !b.isAvailable.IsSet() {
 		b.shared.cancel(waiter)
 		return false, nil
@@ -389,13 +396,18 @@ func (b *AckBuffer) tryAddWithReceiptLocked(e *protocol.DataMessage, size uint64
 		b.bytesSinceFlag += size
 	}
 	if receipt != nil {
-		entry := &trackedAdmission{seq: e.SeqNum, state: receipt}
+		entry := &trackedAdmission{seq: e.SeqNum, state: receipt, max: maxTransmissions}
 		if b.receiptTail == nil {
 			b.receiptHead = entry
 		} else {
 			b.receiptTail.next = entry
 		}
 		b.receiptTail = entry
+		// The new slot is at or after the delivery index, so it is the cursor
+		// whenever no earlier tracked entry still awaits delivery.
+		if b.deliverCursor == nil {
+			b.deliverCursor = entry
+		}
 		receipt.state.Store(uint32(ReceiptRetained))
 	}
 	b.buff[b.nextIndexFree] = e
@@ -447,8 +459,18 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	}
 
 	oldFirst := b.firstSeqNum
-	escapeIndex := b.escapeSeq - b.firstSeqNum
-	b.firstSeqNum = seq + 1
+	b.removePrefixLocked(indexAcked)
+	b.ackReceiptsLocked(oldFirst, indexAcked)
+	b.releaseRetiredHeadLocked()
+	return nil
+}
+
+// removePrefixLocked removes buffer slots 0..indexAcked: byte charges, escape,
+// delivery index, availability and events. Receipts are the caller's.
+func (b *AckBuffer) removePrefixLocked(indexAcked uint64) {
+	oldFirst := b.firstSeqNum
+	escapeIndex := b.escapeSeq - oldFirst
+	b.firstSeqNum = oldFirst + indexAcked + 1
 	if b.accounting {
 		var freed uint64
 		for _, sz := range b.sizes[:indexAcked+1] {
@@ -495,15 +517,30 @@ func (b *AckBuffer) Ack(seq uint64) error {
 		b.isReadyToDeliver.Clear()
 		b.isEmpty.Set()
 	}
-	b.ackReceiptsLocked(oldFirst, indexAcked)
-	return nil
+	// The map holds only retired slots still in the buffer (none without opt-in).
+	for seq := range b.retired {
+		if seq-oldFirst <= indexAcked {
+			delete(b.retired, seq)
+		}
+	}
 }
 
+// GetUnAcked returns the messages awaiting acknowledgement. Retired slots
+// hold no message to recover and are left out.
 func (b *AckBuffer) GetUnAcked() ([]*protocol.DataMessage, error) {
 	b.RLock()
 	defer b.RUnlock()
-	out := make([]*protocol.DataMessage, b.nextIndexFree)
-	copy(out, b.buff[:b.nextIndexFree])
+	if len(b.retired) == 0 {
+		out := make([]*protocol.DataMessage, b.nextIndexFree)
+		copy(out, b.buff[:b.nextIndexFree])
+		return out, nil
+	}
+	out := make([]*protocol.DataMessage, 0, b.nextIndexFree-uint64(len(b.retired)))
+	for i := uint64(0); i < b.nextIndexFree; i++ {
+		if _, retired := b.retired[b.firstSeqNum+i]; !retired {
+			out = append(out, b.buff[i])
+		}
+	}
 	return out, nil
 }
 
@@ -516,27 +553,140 @@ func (b *AckBuffer) GetNextToDeliver(timeout time.Duration) *protocol.DataMessag
 	if !b.isReadyToDeliver.IsSet() {
 		return nil
 	}
-	n := b.buff[b.nextIndexToDeliver]
-	if !b.isRunning && b.nextIndexToDeliver+1 == b.nextIndexFree {
-		// Do not mutate the retained message while a sender may encode it.
-		// Cumulative ACKs need one extra request, on the final queued frame.
-		// Already transmitted tails are confirmed by the proxy's periodic ACK.
-		copy := *n
-		copy.AckRequested = true
-		n = &copy
+	for b.nextIndexToDeliver < b.nextIndexFree {
+		index := b.nextIndexToDeliver
+		seq := b.firstSeqNum + index
+		var entry *trackedAdmission
+		if c := b.deliverCursor; c != nil && c.seq-b.firstSeqNum == index {
+			entry = c
+			b.deliverCursor = c.next
+		}
+		if _, retired := b.retired[seq]; retired {
+			b.nextIndexToDeliver++
+			continue
+		}
+		if entry != nil && entry.max != 0 {
+			if entry.sends >= entry.max {
+				// The pre-send fence: this would be handoff max+1.
+				b.retireLocked(index, entry)
+				b.nextIndexToDeliver++
+				b.releaseRetiredHeadLocked()
+				continue
+			}
+			entry.sends++
+		}
+		n := b.buff[index]
+		if !b.isRunning && b.onlyRetiredAfterLocked(index) {
+			// Do not mutate the retained message while a sender may encode it.
+			// Cumulative ACKs need one extra request, on the final queued frame.
+			// Already transmitted tails are confirmed by the proxy's periodic ACK.
+			copy := *n
+			copy.AckRequested = true
+			n = &copy
+		}
+		b.nextIndexToDeliver++
+		if b.nextIndexToDeliver >= b.nextIndexFree {
+			b.isReadyToDeliver.Clear()
+			b.isEmpty.Set()
+		}
+		return n
 	}
-	b.nextIndexToDeliver++
-	if b.nextIndexToDeliver >= b.nextIndexFree {
-		b.isReadyToDeliver.Clear()
-		b.isEmpty.Set()
+	b.isReadyToDeliver.Clear()
+	b.isEmpty.Set()
+	return nil
+}
+
+// onlyRetiredAfterLocked reports whether every slot after index is retired,
+// i.e. index is the final frame that will actually be sent. Must hold the lock.
+func (b *AckBuffer) onlyRetiredAfterLocked(index uint64) bool {
+	if len(b.retired) == 0 {
+		return index+1 == b.nextIndexFree
 	}
-	return n
+	// Stops at the first live slot: O(retired run) per drain handoff.
+	for i := index + 1; i < b.nextIndexFree; i++ {
+		if _, retired := b.retired[b.firstSeqNum+i]; !retired {
+			return false
+		}
+	}
+	return true
+}
+
+// retireLocked replaces slot index with a metadata-only placeholder that keeps
+// its sequence number (slot indexes never compact), marks the receipt retired
+// and returns the slot's byte charge. The admitted message itself is not
+// touched. Must hold the lock.
+func (b *AckBuffer) retireLocked(index uint64, entry *trackedAdmission) {
+	seq := entry.seq
+	entry.state.state.Store(uint32(ReceiptRetired))
+	b.buff[index] = &protocol.DataMessage{SeqNum: seq}
+	if b.retired == nil {
+		b.retired = make(map[uint64]struct{})
+	}
+	b.retired[seq] = struct{}{}
+	if b.accounting && index < uint64(len(b.sizes)) {
+		size := b.sizes[index]
+		b.sizes[index] = 0
+		// After Close the bytes were already returned: never release twice.
+		if size > b.bytes {
+			size = b.bytes
+		}
+		b.bytes -= size
+		var escape uint64
+		if b.escapeBytes != 0 && b.escapeSeq == seq {
+			escape = b.escapeBytes
+			b.escapeBytes = 0
+		}
+		b.shared.releaseFor(size, escape, b.group)
+	}
+	// A retired frame never produces its own ACK, so it cannot be the held
+	// ACK request the byte limits rely on: the next over-limit admission is
+	// admitted and flagged instead of waiting for it.
+	if b.lastFlaggedSeq == seq {
+		b.lastFlaggedSeq = 0
+	}
+	b.signalLocked()
+}
+
+// releaseRetiredHeadLocked removes retired slots from the front of the buffer.
+// They will never be sent again, so a retired tail must not wait for an ACK
+// that only a later frame could carry. This is local removal, not an ACK:
+// receipts stay retired and OnAck is not called. Must hold the lock.
+func (b *AckBuffer) releaseRetiredHeadLocked() {
+	if len(b.retired) == 0 {
+		return
+	}
+	n := uint64(0)
+	for n < b.nextIndexFree {
+		if _, retired := b.retired[b.firstSeqNum+n]; !retired {
+			break
+		}
+		n++
+	}
+	if n == 0 {
+		return
+	}
+	oldFirst := b.firstSeqNum
+	b.removePrefixLocked(n - 1)
+	b.dropReceiptsLocked(oldFirst, n-1, false)
 }
 
 func (b *AckBuffer) ResetDelivery() {
 	b.Lock()
 	defer b.Unlock()
 	b.nextIndexToDeliver = 0
+	b.deliverCursor = b.receiptHead
+	// Retire every limited frame that already had its last handoff, before the
+	// next connection exists, so its receipt reads retired without waiting for
+	// the replay to reach it.
+	for entry := b.receiptHead; entry != nil; entry = entry.next {
+		if entry.max == 0 || entry.sends < entry.max {
+			continue
+		}
+		if _, retired := b.retired[entry.seq]; !retired {
+			b.retireLocked(entry.seq-b.firstSeqNum, entry)
+		}
+	}
+	b.releaseRetiredHeadLocked()
 	if b.nextIndexToDeliver >= b.nextIndexFree {
 		b.isReadyToDeliver.Clear()
 		b.isEmpty.Set()

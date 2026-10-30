@@ -25,6 +25,10 @@ const (
 	ReceiptRetained
 	ReceiptAcknowledged
 	ReceiptClosedUnconfirmed
+	// ReceiptRetired is final: an opt-in transmission limit was reached, so the
+	// buffer dropped its payload reference and never hands the frame out again.
+	// It is not an acknowledgement and no later cumulative ACK converts it.
+	ReceiptRetired
 )
 
 // ReceiptLifetime distinguishes closing intent from actual registered-I/O join.
@@ -54,6 +58,19 @@ type trackedAdmission struct {
 	seq   uint64
 	state *receiptState
 	next  *trackedAdmission
+	// Opt-in transmission limit; zero means unlimited and sends stays zero.
+	max, sends uint32
+}
+
+// ShipOptions are per-frame admission options for ShipWithReceiptOptions.
+type ShipOptions struct {
+	// MaxTransmissions bounds how many times this frame is handed to a
+	// connection's sender: the first send plus every reconnect replay. Once
+	// reached, the next handoff (or the reconnect's delivery reset) retires the
+	// frame instead: its receipt reads ReceiptRetired, its payload reference and
+	// byte charge are released, and later frames keep their sequence numbers, so
+	// the peer sees a sequence gap. Zero means unlimited, the Ship behavior.
+	MaxTransmissions uint32
 }
 
 // ErrorReceiptUnavailable means an opt-in receipt cannot be produced by a test
@@ -65,6 +82,12 @@ var ErrorReceiptUnavailable = errors.New("admission receipt unavailable in test 
 // On error it returns an invalid receipt. A peer can acknowledge the entry
 // before this method returns; that acknowledgement is preserved in its cell.
 func (c *Client) ShipWithReceipt(message *protocol.DataMessage, timeout time.Duration) (AdmissionReceipt, error) {
+	return c.ShipWithReceiptOptions(message, timeout, ShipOptions{})
+}
+
+// ShipWithReceiptOptions is ShipWithReceipt with per-frame options. Retirement
+// never mutates the admitted message; it only drops the buffer's reference.
+func (c *Client) ShipWithReceiptOptions(message *protocol.DataMessage, timeout time.Duration, options ShipOptions) (AdmissionReceipt, error) {
 	if c.options.TestSinkMode {
 		return AdmissionReceipt{}, ErrorReceiptUnavailable
 	}
@@ -72,7 +95,7 @@ func (c *Client) ShipWithReceipt(message *protocol.DataMessage, timeout time.Dur
 		return AdmissionReceipt{}, ErrorClosed
 	}
 	state := &receiptState{}
-	if err := c.ab.addWithReceipt(message, timeout, state); err != nil {
+	if err := c.ab.addWithReceipt(message, timeout, state, options.MaxTransmissions); err != nil {
 		return AdmissionReceipt{}, err
 	}
 	// Bind the opaque owner only after real admission. The state was already
@@ -116,7 +139,7 @@ func (c *Client) ObserveReceipt(receipt AdmissionReceipt) ReceiptObservation {
 		return ReceiptObservation{}
 	}
 	state := ReceiptFrameState(receipt.state.state.Load())
-	if state != ReceiptRetained && state != ReceiptAcknowledged {
+	if state != ReceiptRetained && state != ReceiptAcknowledged && state != ReceiptRetired {
 		return ReceiptObservation{}
 	}
 	lifetime := ReceiptLifetime(receipt.owner.lifetime.Load())
@@ -137,18 +160,33 @@ func (c *Client) ObserveReceipt(receipt AdmissionReceipt) ReceiptObservation {
 
 // Called only after Ack has validated and removed the cumulative prefix. The
 // subtraction is the same unsigned wrap-safe entry distance as Ack's index.
+// A retired frame stays retired: a later sequence's ACK is not its ACK.
 func (b *AckBuffer) ackReceiptsLocked(first, index uint64) {
+	b.dropReceiptsLocked(first, index, true)
+}
+
+// dropReceiptsLocked detaches the tracked entries of a removed prefix.
+func (b *AckBuffer) dropReceiptsLocked(first, index uint64, acknowledge bool) {
+	cursorRemoved := false
 	for entry := b.receiptHead; entry != nil && entry.seq-first <= index; entry = b.receiptHead {
 		b.receiptHead = entry.next
+		cursorRemoved = cursorRemoved || entry == b.deliverCursor
 		entry.next = nil
-		entry.state.state.Store(uint32(ReceiptAcknowledged))
+		if acknowledge {
+			entry.state.state.CompareAndSwap(uint32(ReceiptRetained), uint32(ReceiptAcknowledged))
+		}
 	}
 	if b.receiptHead == nil {
 		b.receiptTail = nil
 	}
+	if cursorRemoved {
+		// Only an all-delivered or all-retired prefix can contain the cursor,
+		// so the delivery index is now at or before the first remaining entry.
+		b.deliverCursor = b.receiptHead
+	}
 }
 func (b *AckBuffer) releaseReceiptTracking() {
 	b.Lock()
-	b.receiptHead, b.receiptTail = nil, nil
+	b.receiptHead, b.receiptTail, b.deliverCursor = nil, nil, nil
 	b.Unlock()
 }
