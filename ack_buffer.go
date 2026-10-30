@@ -52,6 +52,10 @@ type AckBuffer struct {
 	// allocated by the first retirement only, and its entries leave with their
 	// slots; buffers that never opt in never touch it.
 	retired map[uint64]struct{}
+	// releasedRetired remembers the latest retired sequence numbers removed
+	// locally by releaseRetiredHeadLocked, so a late peer ACK for exactly one
+	// of them is a harmless no-op. Allocated by the first such release only.
+	releasedRetired *releasedRetiredRing
 	sync.RWMutex
 
 	isClosed    bool
@@ -171,8 +175,9 @@ func (b *AckBuffer) drain(ctx context.Context) error {
 			err = ErrorClosed
 		}
 		if err != nil {
-			e := &DrainError{Unacked: int(b.nextIndexFree) - len(b.retired), FirstSeq: b.buff[0].SeqNum,
-				LastSeq: b.buff[b.nextIndexFree-1].SeqNum, Err: err}
+			first, last := b.liveSeqBoundsLocked()
+			e := &DrainError{Unacked: int(b.nextIndexFree) - len(b.retired), FirstSeq: first,
+				LastSeq: last, Err: err}
 			b.Unlock()
 			return e
 		}
@@ -430,6 +435,13 @@ func (b *AckBuffer) Ack(seq uint64) error {
 	}
 	b.Lock()
 	defer b.Unlock()
+	// A frame retired and released locally may still have reached the peer, so
+	// its exact sequence can be ACKed late. Nothing of it remains to confirm and
+	// nothing else is acknowledged. Only remembered, out-of-buffer sequences
+	// qualify; without opt-in retirement the ring is nil and nothing changes.
+	if b.releasedRetired != nil && seq-b.firstSeqNum >= b.nextIndexFree && b.releasedRetired.has(seq) {
+		return nil
+	}
 	if seq < b.firstSeqNum && uint64(len(b.buff))-(math.MaxUint64-b.firstSeqNum) <= seq {
 		return fmt.Errorf("unexpected acked sequence number: %d", seq)
 	}
@@ -666,8 +678,66 @@ func (b *AckBuffer) releaseRetiredHeadLocked() {
 		return
 	}
 	oldFirst := b.firstSeqNum
+	if b.releasedRetired == nil {
+		b.releasedRetired = &releasedRetiredRing{}
+	}
+	for i := uint64(0); i < n; i++ {
+		b.releasedRetired.add(oldFirst + i)
+	}
 	b.removePrefixLocked(n - 1)
 	b.dropReceiptsLocked(oldFirst, n-1, false)
+}
+
+// releasedRetiredMemory bounds how many locally released retired sequence
+// numbers are remembered for late-ACK tolerance. An ACK for an older one is
+// rejected as before (a warning), never treated as confirmation.
+const releasedRetiredMemory = 64
+
+type releasedRetiredRing struct {
+	seqs [releasedRetiredMemory]uint64
+	n    int
+	next int
+}
+
+func (r *releasedRetiredRing) add(seq uint64) {
+	r.seqs[r.next] = seq
+	r.next = (r.next + 1) % releasedRetiredMemory
+	if r.n < releasedRetiredMemory {
+		r.n++
+	}
+}
+
+// has compares for equality only, so it is wrap-safe.
+func (r *releasedRetiredRing) has(seq uint64) bool {
+	for i := 0; i < r.n; i++ {
+		if r.seqs[i] == seq {
+			return true
+		}
+	}
+	return false
+}
+
+// liveSeqBoundsLocked returns the first and last sequence numbers still
+// awaiting acknowledgement, skipping retired placeholders so DrainError's range
+// matches its Unacked count. Without retirements it is buff[0] and the last
+// slot, as before. Must hold the lock with nextIndexFree > 0.
+func (b *AckBuffer) liveSeqBoundsLocked() (uint64, uint64) {
+	first, last := uint64(0), b.nextIndexFree-1
+	if len(b.retired) != 0 {
+		for first < last {
+			if _, retired := b.retired[b.firstSeqNum+first]; !retired {
+				break
+			}
+			first++
+		}
+		for last > first {
+			if _, retired := b.retired[b.firstSeqNum+last]; !retired {
+				break
+			}
+			last--
+		}
+	}
+	return b.buff[first].SeqNum, b.buff[last].SeqNum
 }
 
 func (b *AckBuffer) ResetDelivery() {

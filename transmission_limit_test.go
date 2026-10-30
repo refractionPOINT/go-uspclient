@@ -2,6 +2,7 @@ package uspclient
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -293,8 +294,8 @@ func TestTransmissionLimitDrainRequestsAckOnLastLiveFrame(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
 	defer cancel()
 	var de *DrainError
-	if err := b.drain(ctx); err == nil || !asDrainError(err, &de) || de.Unacked != 1 {
-		t.Fatalf("drain error must count only the live frame: %v", err)
+	if err := b.drain(ctx); err == nil || !asDrainError(err, &de) || de.Unacked != 1 || de.FirstSeq != 1 || de.LastSeq != 1 {
+		t.Fatalf("drain error must count and name only the live frame: %v", err)
 	}
 }
 
@@ -451,9 +452,11 @@ func TestTransmissionLimitRealReconnects(t *testing.T) {
 	reconnectRetryDelay.Store(int64(10 * time.Millisecond))
 	t.Cleanup(func() { reconnectRetryDelay.Store(oldDelay) })
 	p := newLimitPeer(t)
+	var warnings atomic.Int32
 	c, err := NewClient(context.Background(), ClientOptions{
 		Identity: Identity{Oid: "00000000-0000-4000-8000-000000000001", InstallationKey: "synthetic-only"},
 		DestURL:  "ws" + strings.TrimPrefix(p.server.URL, "http") + "/usp", Platform: "text",
+		OnWarning: func(string) { warnings.Add(1) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -498,8 +501,15 @@ func TestTransmissionLimitRealReconnects(t *testing.T) {
 	if countSeq(all, 2) != 5 || countSeq(all, 3) != 5 {
 		t.Fatalf("unlimited frames must be sent on every connection: %v", all)
 	}
+	// A late ACK for exactly the released retired frame is a quiet no-op; the
+	// listener handles it before the next ACK on the same connection.
+	baseline := warnings.Load() // reconnect and refused-dial warnings so far
+	p.ack(t, 1)
 	p.ack(t, 3)
 	limitWait(t, "ack", func() bool { return c.ObserveReceipt(unlimited).Frame == ReceiptAcknowledged })
+	if n := warnings.Load() - baseline; n != 0 {
+		t.Fatalf("late ACK for a released retired frame produced %d warnings", n)
+	}
 	if obs := c.ObserveReceipt(limited); obs != (ReceiptObservation{Frame: ReceiptRetired, Lifetime: ReceiptLive}) {
 		t.Fatalf("cumulative ACK changed the retired receipt: %+v", obs)
 	}
@@ -535,5 +545,174 @@ func TestTransmissionLimitPlaceholderNeverSent(t *testing.T) {
 	b.Unlock()
 	if got := limitDeliverAll(b); !reflect.DeepEqual(got, []uint64{1, 3}) {
 		t.Fatalf("handed out %v", got)
+	}
+}
+
+// limitReleaseRetiredHead retires a limited frame at the head of b and has it
+// released locally, returning its sequence number.
+func limitReleaseRetiredHead(t *testing.T, b *AckBuffer) (uint64, *receiptState) {
+	t.Helper()
+	state := limitAdmit(t, b, &protocol.DataMessage{TextPayload: "limited"}, 1)
+	b.RLock()
+	seq := b.nextSeqNum - 1
+	b.RUnlock()
+	limitDeliverAll(b)
+	b.ResetDelivery()
+	if frameState(state) != ReceiptRetired {
+		t.Fatalf("fixture: %v", frameState(state))
+	}
+	b.RLock()
+	defer b.RUnlock()
+	if b.nextIndexFree != 0 && b.firstSeqNum <= seq {
+		t.Fatal("fixture: retired head not released")
+	}
+	return seq, state
+}
+
+// Guard: the late-ACK no-op for a locally released retired frame. The ACK is
+// accepted without acknowledging that frame or any other one.
+func TestTransmissionLimitLateAckForReleasedRetiredIsNoOp(t *testing.T) {
+	var acks atomic.Int32
+	b := limitBuffer(t, AckBufferOptions{OnAck: func() { acks.Add(1) }}, 8)
+	seq, retired := limitReleaseRetiredHead(t, b)
+	pending := limitAdmit(t, b, &protocol.DataMessage{TextPayload: "pending"}, 0)
+	second := limitAdmit(t, b, &protocol.DataMessage{TextPayload: "second"}, 0)
+	b.RLock()
+	before := [3]uint64{b.firstSeqNum, b.nextIndexFree, b.nextIndexToDeliver}
+	b.RUnlock()
+	if err := b.Ack(seq); err != nil {
+		t.Fatalf("late ACK for a released retired frame: %v", err)
+	}
+	b.RLock()
+	after := [3]uint64{b.firstSeqNum, b.nextIndexFree, b.nextIndexToDeliver}
+	b.RUnlock()
+	if before != after || frameState(retired) != ReceiptRetired || frameState(pending) != ReceiptRetained {
+		t.Fatalf("no-op changed state: %v -> %v, retired=%v pending=%v", before, after, frameState(retired), frameState(pending))
+	}
+	if acks.Load() != 1 {
+		t.Fatalf("OnAck callbacks %d", acks.Load())
+	}
+	// Neither pending frame was delivered on this connection: an ACK past the
+	// head, and any future sequence, stay rejected.
+	if err := b.Ack(seq + 2); err == nil {
+		t.Fatal("ACK for an undelivered frame accepted")
+	}
+	if err := b.Ack(seq + 3); err == nil {
+		t.Fatal("ACK for a future sequence accepted")
+	}
+	if frameState(pending) != ReceiptRetained || frameState(second) != ReceiptRetained {
+		t.Fatal("rejected ACK acknowledged a frame")
+	}
+}
+
+// Guard: only exact remembered sequences qualify. Ordinary stale ACKs keep
+// their rejection, with or without opt-in retirement elsewhere in the buffer.
+func TestTransmissionLimitStaleAckRejectionUnchanged(t *testing.T) {
+	plain := limitBuffer(t, AckBufferOptions{}, 8)
+	limitPlain(t, plain, &protocol.DataMessage{TextPayload: "a"})
+	limitPlain(t, plain, &protocol.DataMessage{TextPayload: "b"})
+	limitDeliverAll(plain)
+	if err := plain.Ack(2); err != nil {
+		t.Fatal(err)
+	}
+	err := plain.Ack(1)
+	if err == nil || !strings.Contains(err.Error(), "is not in buffer") || plain.releasedRetired != nil {
+		t.Fatalf("default stale ACK must be rejected as before: %v", err)
+	}
+
+	b := limitBuffer(t, AckBufferOptions{}, 8)
+	limitPlain(t, b, &protocol.DataMessage{TextPayload: "ordinary"})
+	limitDeliverAll(b)
+	if err := b.Ack(1); err != nil {
+		t.Fatal(err)
+	}
+	limitReleaseRetiredHead(t, b) // seq 2, remembered
+	if err := b.Ack(1); err == nil || !strings.Contains(err.Error(), "is not in buffer") {
+		t.Fatalf("stale ACK for an ordinary acknowledged frame must stay rejected: %v", err)
+	}
+}
+
+// Guard: a remembered sequence that is (artificially) in the buffer is ACKed
+// normally, never swallowed: the no-op applies only outside the buffer.
+func TestTransmissionLimitRememberedSeqInBufferAcksNormally(t *testing.T) {
+	b := limitBuffer(t, AckBufferOptions{}, 8)
+	seq, _ := limitReleaseRetiredHead(t, b)
+	live := limitAdmit(t, b, &protocol.DataMessage{TextPayload: "live"}, 0)
+	limitDeliverAll(b)
+	b.Lock()
+	b.releasedRetired.add(seq + 1)
+	b.Unlock()
+	if err := b.Ack(seq + 1); err != nil {
+		t.Fatal(err)
+	}
+	if frameState(live) != ReceiptAcknowledged {
+		t.Fatalf("in-buffer ACK was swallowed: %v", frameState(live))
+	}
+}
+
+// Guard: equality matching works across the sequence wraparound.
+func TestTransmissionLimitLateAckWraparound(t *testing.T) {
+	b := limitBuffer(t, AckBufferOptions{}, 8)
+	b.Lock()
+	b.firstSeqNum, b.nextSeqNum = math.MaxUint64-1, math.MaxUint64-1
+	b.Unlock()
+	seq, _ := limitReleaseRetiredHead(t, b)
+	if seq != math.MaxUint64-1 {
+		t.Fatalf("fixture seq %d", seq)
+	}
+	live := limitAdmit(t, b, &protocol.DataMessage{TextPayload: "max"}, 0)
+	limitDeliverAll(b)
+	if err := b.Ack(seq); err != nil {
+		t.Fatalf("late ACK at the wrap: %v", err)
+	}
+	if frameState(live) != ReceiptRetained {
+		t.Fatal("late ACK acknowledged the next frame")
+	}
+	if err := b.Ack(math.MaxUint64); err != nil || frameState(live) != ReceiptAcknowledged {
+		t.Fatalf("ordinary ACK at the wrap: %v", err)
+	}
+	if err := b.Ack(seq); err != nil {
+		t.Fatalf("remembered sequence after the wrap: %v", err)
+	}
+}
+
+// Guard: the memory is bounded; an ACK for a sequence older than it is
+// rejected as before, never treated as confirmation.
+func TestTransmissionLimitLateAckMemoryBounded(t *testing.T) {
+	b := limitBuffer(t, AckBufferOptions{}, 8)
+	var seqs []uint64
+	for i := 0; i <= releasedRetiredMemory; i++ {
+		seq, _ := limitReleaseRetiredHead(t, b)
+		seqs = append(seqs, seq)
+	}
+	if err := b.Ack(seqs[0]); err == nil {
+		t.Fatal("forgotten sequence accepted")
+	}
+	if err := b.Ack(seqs[len(seqs)-1]); err != nil {
+		t.Fatalf("newest remembered sequence: %v", err)
+	}
+	if err := b.Ack(seqs[1]); err != nil {
+		t.Fatalf("oldest remembered sequence: %v", err)
+	}
+}
+
+// Guard: without retirements DrainError keeps naming the first and last slot.
+func TestTransmissionLimitDrainErrorDefaultBounds(t *testing.T) {
+	b := limitBuffer(t, AckBufferOptions{}, 8)
+	for i := 0; i < 3; i++ {
+		limitPlain(t, b, &protocol.DataMessage{TextPayload: "plain"})
+	}
+	limitDeliverAll(b)
+	if err := b.Ack(1); err != nil {
+		t.Fatal(err)
+	}
+	b.Lock()
+	b.isRunning = false
+	b.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	var de *DrainError
+	if err := b.drain(ctx); !asDrainError(err, &de) || de.Unacked != 2 || de.FirstSeq != 2 || de.LastSeq != 3 {
+		t.Fatalf("default drain error %v", err)
 	}
 }

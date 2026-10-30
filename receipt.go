@@ -70,6 +70,8 @@ type ShipOptions struct {
 	// frame instead: its receipt reads ReceiptRetired, its payload reference and
 	// byte charge are released, and later frames keep their sequence numbers, so
 	// the peer sees a sequence gap. Zero means unlimited, the Ship behavior.
+	// The limit belongs to this admission; re-shipping Close leftovers creates
+	// a new admission and does not preserve its transmission count.
 	MaxTransmissions uint32
 }
 
