@@ -196,3 +196,28 @@ Data sent via USP can be formatted in many different ways. Data is processed in 
 1. Built-in (in the cloud) LimaCharlie parsers that apply to specific `Platform` values (like `carbon_black`).
 1. The various "extractors" defined, like `EventTypePath`, `EventTimePath`, `SensorHostnamePath` and `SensorKeyPath`.
 1. Custom `Mappings` directives provided by the client.
+
+### Confirming a source interval
+
+`ShipWithReceipt` returns an opaque `AdmissionReceipt` after buffer admission.
+Admission alone does not confirm remote acceptance. Collect the receipts for
+**every** frame in a complete source interval, including every fragment, then use
+`client.WaitForReceipts(ctx, receipts...)` before advancing its saved position.
+If admission fails for any frame, the interval must not advance. A complete empty
+interval has no delivery dependencies; source completeness remains the caller's
+responsibility.
+
+The wait uses validated cumulative acknowledgements, survives reconnects, and
+leaves admission open. It waits only for the supplied receipts, so callers sharing
+a frontier must also enforce source interval order. Cancellation returns the
+context error and permits retrying the same receipts. Closing returns
+`ErrorClosed`; zero or foreign receipts return `ErrorInvalidReceipt`; a frame
+retired by a transmission limit returns `ErrorReceiptRetired`. Test sink mode
+cannot confirm delivery and returns `ErrorReceiptUnavailable`.
+
+Keep each receipt set bounded to its interval. Receipts retain no event payloads.
+`ObserveReceipt` is available for nonblocking observation; `OnAck` runs before ACK
+validation and is only a wake hint. The peer's deployed ACK contract determines
+what acceptance means: it may include explicitly rejected records, and does not
+prove durable downstream storage or completion of Outputs. A legacy peer that
+ACKs on read cannot establish endpoint acceptance.
