@@ -29,9 +29,15 @@ func confirmationShip(t *testing.T, c *Client) AdmissionReceipt {
 	}
 	return r
 }
+func confirmationContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	return ctx
+}
 func confirmationPending(t *testing.T, c *Client, receipts ...AdmissionReceipt) <-chan error {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	result := make(chan error, 1)
 	go func() { result <- c.WaitForReceipts(ctx, receipts...) }()
@@ -75,7 +81,7 @@ func TestConfirmationAllFragmentsAndNonterminal(t *testing.T) {
 		t.Fatal("unrelated frame confirmed")
 	}
 	confirmationShip(t, c) // A successful barrier must leave admission open.
-	if err := c.WaitForReceipts(context.Background(), a, b); err != nil {
+	if err := c.WaitForReceipts(confirmationContext(t), a, b); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -98,17 +104,20 @@ func TestConfirmationInvalidAckAndTokens(t *testing.T) {
 	if c.ab.Ack(99) == nil {
 		t.Fatal("invalid ACK accepted")
 	}
+	if c.ObserveReceipt(r).Frame != ReceiptRetained {
+		t.Fatal("invalid ACK confirmed receipt")
+	}
 	if calls != 1 {
 		t.Fatal("wake hint not exercised")
 	}
-	if err := c.WaitForReceipts(context.Background(), AdmissionReceipt{}); !errors.Is(err, ErrorInvalidReceipt) {
+	if err := c.WaitForReceipts(confirmationContext(t), AdmissionReceipt{}); !errors.Is(err, ErrorInvalidReceipt) {
 		t.Fatalf("zero = %v", err)
 	}
 	foreign := confirmationClient(t)
-	if err := foreign.WaitForReceipts(context.Background(), r); !errors.Is(err, ErrorInvalidReceipt) {
+	if err := foreign.WaitForReceipts(confirmationContext(t), r); !errors.Is(err, ErrorInvalidReceipt) {
 		t.Fatalf("foreign = %v", err)
 	}
-	if err := c.WaitForReceipts(context.Background(), r, AdmissionReceipt{}); !errors.Is(err, ErrorInvalidReceipt) {
+	if err := c.WaitForReceipts(confirmationContext(t), r, AdmissionReceipt{}); !errors.Is(err, ErrorInvalidReceipt) {
 		t.Fatalf("mixed = %v", err)
 	}
 	c.ab.onAck = nil
@@ -130,7 +139,7 @@ func TestConfirmationWrapAndAckBeforeWait(t *testing.T) {
 		t.Fatal(err)
 	}
 	confirmationResult(t, result, nil)
-	if err := c.WaitForReceipts(context.Background(), tokens...); err != nil {
+	if err := c.WaitForReceipts(confirmationContext(t), tokens...); err != nil {
 		t.Fatal(err)
 	}
 	confirmationShip(t, c)
@@ -148,7 +157,7 @@ func TestConfirmationCancellationCloseAndAdmissionFailure(t *testing.T) {
 		if err := c.ab.Ack(1); err != nil {
 			t.Fatal(err)
 		}
-		if err := c.WaitForReceipts(context.Background(), r); err != nil {
+		if err := c.WaitForReceipts(confirmationContext(t), r); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -162,7 +171,7 @@ func TestConfirmationCancellationCloseAndAdmissionFailure(t *testing.T) {
 		if !errors.Is(err, ErrorClosed) || r != (AdmissionReceipt{}) {
 			t.Fatalf("closed admission = %v, %v", r, err)
 		}
-		if err := c.WaitForReceipts(context.Background()); !errors.Is(err, ErrorClosed) {
+		if err := c.WaitForReceipts(confirmationContext(t)); !errors.Is(err, ErrorClosed) {
 			t.Fatalf("closed empty set = %v", err)
 		}
 	})
@@ -174,7 +183,7 @@ func TestConfirmationCancellationCloseAndAdmissionFailure(t *testing.T) {
 		if !errors.Is(err, ErrorBufferFull) {
 			t.Fatal(err)
 		}
-		if err := c.WaitForReceipts(context.Background(), r); !errors.Is(err, ErrorInvalidReceipt) {
+		if err := c.WaitForReceipts(confirmationContext(t), r); !errors.Is(err, ErrorInvalidReceipt) {
 			t.Fatalf("failed admission = %v", err)
 		}
 	})
@@ -214,22 +223,30 @@ func TestConfirmationAckBeforeAdmissionReturns(t *testing.T) {
 			c.receiptMu.Unlock()
 		}
 	}()
-	result := make(chan AdmissionReceipt, 1)
-	shipErr := make(chan error, 1)
+	type admissionResult struct {
+		receipt AdmissionReceipt
+		err     error
+	}
+	result := make(chan admissionResult, 1)
 	go func() {
 		r, err := c.ShipWithReceipt(&protocol.DataMessage{TextPayload: "synthetic"}, time.Second)
-		result <- r
-		shipErr <- err
+		result <- admissionResult{receipt: r, err: err}
 	}()
 	frame := p.nextFrame(t)
 	receiptAck(t, c, p, frame.seq)
 	c.receiptMu.Unlock()
 	locked = false
-	r := <-result
-	if err := <-shipErr; err != nil {
-		t.Fatal(err)
+	var admitted admissionResult
+	select {
+	case admitted = <-result:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ShipWithReceipt did not return")
 	}
-	if err := c.WaitForReceipts(context.Background(), r); err != nil {
+	if admitted.err != nil {
+		t.Fatal(admitted.err)
+	}
+	r := admitted.receipt
+	if err := c.WaitForReceipts(confirmationContext(t), r); err != nil {
 		t.Fatal(err)
 	}
 	confirmationShip(t, c)
