@@ -2,10 +2,14 @@ package protocol
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/elastic/go-grok"
 )
@@ -20,6 +24,14 @@ import (
 // could define the Path "some/my-val" which would have the value "here".
 
 type MappingDescriptor struct {
+	// Optional "/"-separated path (like "params/events") to an array inside
+	// each JSON event. For senders that batch events inside an envelope
+	// (JSON-RPC style pushes), when the path resolves to an array of objects
+	// and/or strings, the array's elements are ingested as the events instead
+	// of the enclosing object. Applied before every other mapping step.
+	// See ValidateEventsPath.
+	EventsPath string `json:"events_path,omitempty" yaml:"events_path,omitempty" msgpack:"events_path,omitempty"`
+
 	// Use the named capture groups from the regular
 	// expression below to parse text lines into JSON.
 	ParsingRE string `json:"parsing_re,omitempty" yaml:"parsing_re,omitempty" msgpack:"parsing_re,omitempty"`
@@ -123,6 +135,9 @@ func (md *MappingDescriptor) UnmarshalJSON(data []byte) error {
 }
 
 func (d MappingDescriptor) Validate() error {
+	if err := ValidateEventsPath(d.EventsPath); err != nil {
+		return err
+	}
 	if !ValidSensorIdentityType(d.SensorIdentityType) {
 		return fmt.Errorf("invalid sensor_identity_type")
 	}
@@ -154,4 +169,46 @@ func ValidSensorIdentityType(t string) bool {
 	default:
 		return false
 	}
+}
+
+const (
+	// MaxEventsPathBytes is the maximum size of an events_path.
+	MaxEventsPathBytes = 512
+	// MaxEventsPathSegments is the maximum depth of an events_path.
+	MaxEventsPathSegments = 10
+)
+
+// ValidateEventsPath checks the shape of a mapping events_path: an empty value
+// is valid (feature off), otherwise it must be non-empty "/" separated object
+// keys with no empty or whitespace-padded segment, no control or invisible
+// format characters, and bounded size and depth. Keys are matched exactly:
+// there are no wildcards or array indexes.
+func ValidateEventsPath(path string) error {
+	if path == "" {
+		return nil
+	}
+	if len(path) > MaxEventsPathBytes {
+		return fmt.Errorf("events_path too long (max %d bytes)", MaxEventsPathBytes)
+	}
+	if !utf8.ValidString(path) {
+		return errors.New("events_path is not valid UTF-8")
+	}
+	segments := strings.Split(path, "/")
+	if len(segments) > MaxEventsPathSegments {
+		return fmt.Errorf("events_path too deep (max %d segments)", MaxEventsPathSegments)
+	}
+	for _, segment := range segments {
+		if segment == "" {
+			return errors.New("events_path must not start or end with '/' or contain an empty segment")
+		}
+		if strings.TrimSpace(segment) != segment {
+			return errors.New("events_path segments must not start or end with whitespace")
+		}
+		for _, r := range segment {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+				return errors.New("events_path must not contain control or invisible format characters")
+			}
+		}
+	}
+	return nil
 }
