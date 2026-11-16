@@ -208,6 +208,9 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 		if m.ParsingRE == "" && len(m.ParsingGrok) == 0 {
 			return nil, fmt.Errorf("mappings[%d].parsing_re or parsing_grok not set, one is required for multiple mappings", i)
 		}
+		if err := protocol.ValidateEventsPath(m.EventsPath); err != nil {
+			return nil, fmt.Errorf("invalid mappings[%d].events_path: %v", i, err)
+		}
 		if m.ParsingRE != "" {
 			if _, err := regexp.Compile(m.ParsingRE); err != nil {
 				return nil, fmt.Errorf("invalid mappings[%d].parsing_re: %v", i, err)
@@ -219,6 +222,9 @@ func NewClient(ctx context.Context, o ClientOptions) (*Client, error) {
 				return nil, fmt.Errorf("invalid mappings[%d].parsing_grok: %v", i, err)
 			}
 		}
+	}
+	if err := protocol.ValidateEventsPath(o.Mapping.EventsPath); err != nil {
+		return nil, fmt.Errorf("invalid mapping.events_path: %v", err)
 	}
 	if o.Mapping.ParsingRE != "" {
 		if _, err := regexp.Compile(o.Mapping.ParsingRE); err != nil {

@@ -420,3 +420,51 @@ func TestNewClientCancellationBoundsURLResolution(t *testing.T) {
 		t.Fatalf("URL resolution ignored cancellation for %s", elapsed)
 	}
 }
+
+func TestClientOptionsEventsPathValidation(t *testing.T) {
+	base := func() ClientOptions {
+		return ClientOptions{
+			Identity: Identity{
+				Oid:             "test-oid",
+				InstallationKey: "test-key",
+			},
+			Platform:     "test",
+			TestSinkMode: true,
+		}
+	}
+
+	t.Run("valid in mapping", func(t *testing.T) {
+		o := base()
+		o.Mapping = protocol.MappingDescriptor{EventsPath: "params/events"}
+		if err := o.Validate(); err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("invalid in mapping", func(t *testing.T) {
+		o := base()
+		o.Mapping = protocol.MappingDescriptor{EventsPath: "params//events"}
+		if err := o.Validate(); err == nil {
+			t.Error("expected error for invalid events_path in mapping")
+		}
+	})
+
+	t.Run("invalid in one of the mappings", func(t *testing.T) {
+		o := base()
+		o.Mappings = []protocol.MappingDescriptor{
+			{EventsPath: "params/events"},
+			{EventsPath: "/params"},
+		}
+		if err := o.Validate(); err == nil {
+			t.Error("expected error for invalid events_path in mappings")
+		}
+	})
+
+	t.Run("NewClient rejects invalid", func(t *testing.T) {
+		o := base()
+		o.Mapping = protocol.MappingDescriptor{EventsPath: "a/ b"}
+		if _, err := NewClient(context.Background(), o); err == nil {
+			t.Error("expected NewClient to reject invalid events_path")
+		}
+	})
+}
