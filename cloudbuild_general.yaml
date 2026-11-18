@@ -1,3 +1,5 @@
 steps:
   - name: 'golang'
     args: ['go', 'test', '-race', './...', '-v']
+options:
+  logging: CLOUD_LOGGING_ONLY
