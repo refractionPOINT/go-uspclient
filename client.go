@@ -49,6 +49,7 @@ type Client struct {
 	isStop         *Event
 	isReconnecting uint32
 	backoffTime    uint64
+	backoffUntil   time.Time // Owned by the sender, including across reconnects.
 
 	lastError  error
 	errorMutex sync.Mutex
@@ -66,6 +67,8 @@ type Client struct {
 // attempts, in nanoseconds. Atomic so tests can shorten it while a reconnect
 // goroutine from an earlier test is still winding down.
 var reconnectRetryDelay atomic.Int64
+
+const establishedWriteTimeout = 30 * time.Minute
 
 func init() { reconnectRetryDelay.Store(int64(5 * time.Second)) }
 
@@ -105,6 +108,15 @@ type ClientOptions struct {
 	// Auto-detect if not specified (preferred).
 	DestURL string        `json:"dest_url,omitempty" yaml:"dest_url,omitempty" msgpack:"dest_url,omitempty"`
 	GenURL  func() string `json:"-" yaml:"-" msgpack:"-"`
+
+	// LivenessTimeout bounds how long an established connection can go
+	// without a message, ping or pong from the peer. Zero uses the default
+	// keepalive behavior.
+	LivenessTimeout time.Duration `json:"liveness_timeout,omitempty" yaml:"liveness_timeout,omitempty" msgpack:"liveness_timeout,omitempty"`
+	// ReconnectTimeout bounds network setup on each reconnect attempt through
+	// the USP READY response. Zero uses the default per-phase timeouts.
+	// The context passed to NewClient controls initial connection setup.
+	ReconnectTimeout time.Duration `json:"reconnect_timeout,omitempty" yaml:"reconnect_timeout,omitempty" msgpack:"reconnect_timeout,omitempty"`
 
 	// Simple flag to operate the client as a sink for testing.
 	TestSinkMode bool `json:"-" yaml:"-" msgpack:"-"`
@@ -365,7 +377,7 @@ func (c *Client) Close() ([]*protocol.DataMessage, error) {
 		c.closeCancel()
 	}
 	c.ab.Close()
-	err1 := c.disconnect()
+	err1 := c.disconnect(true)
 	messages, err2 := c.ab.GetUnAcked()
 	err := err1
 	if err == nil {
@@ -556,7 +568,15 @@ func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func())
 		return err
 	}
 
-	// Send the USP header.
+	// The WebSocket dialer clears its deadline after upgrade. Keep setup
+	// cancellable through both the USP header write and the READY read.
+	stopCloseOnCancel := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stopCloseOnCancel()
+	if deadline, ok := ctx.Deadline(); ok {
+		conn.SetWriteDeadline(deadline)
+		conn.SetReadDeadline(deadline)
+	}
+
 	if err := conn.WriteJSON(protocol.ConnectionHeader{
 		Version:         protocol.CurrentVersion,
 		Oid:             c.options.Identity.Oid,
@@ -573,23 +593,15 @@ func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func())
 		InstanceID:      c.instanceID,
 	}); err != nil {
 		c.onWarning(fmt.Sprintf("WriteJSON(): %v", err))
-		conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
 		conn.Close()
 		c.setLastError(err)
 		return err
 	}
 	// Wait for sink ready signal.
-	// Closing the socket on cancellation unblocks the READY read below, so
-	// Close() (which waits on connMutex) does not sit out the whole timeout.
-	stopCloseOnCancel := context.AfterFunc(ctx, func() { conn.Close() })
-	defer stopCloseOnCancel()
-	// Use context deadline if available, otherwise default to 25s timeout.
-	msg := protocol.ControlMessage{}
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetReadDeadline(deadline)
-	} else {
+	if _, ok := ctx.Deadline(); !ok {
 		conn.SetReadDeadline(time.Now().Add(25 * time.Second))
 	}
+	msg := protocol.ControlMessage{}
 	if err := conn.ReadJSON(&msg); err != nil {
 		// Nobody else owns this socket: close it or it stays open (and
 		// counted by the server) until the garbage collector finds it.
@@ -603,6 +615,7 @@ func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func())
 		c.setLastError(ctx.Err())
 		return ctx.Err()
 	}
+	conn.SetWriteDeadline(time.Time{})
 
 	// We expect a READY control message to tell us
 	// we're good to go. If not, abort.
@@ -631,10 +644,16 @@ func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func())
 		c.log("usp-client connected")
 	}()
 	c.conn = conn
+	listenerDone := make(chan struct{})
+	var pongs chan string
+	if c.options.LivenessTimeout > 0 {
+		pongs = make(chan string, 1)
+	}
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		c.listener()
+		defer close(listenerDone)
+		c.listener(pongs)
 	}()
 	c.wg.Add(1)
 	go func() {
@@ -644,19 +663,21 @@ func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func())
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		c.keepAliveSender()
+		c.keepAliveSender(listenerDone, pongs)
 	}()
 	return nil
 }
 
-func (c *Client) disconnect() error {
+func (c *Client) disconnect(graceful bool) error {
 	c.log("usp-client disconnecting")
 	c.isStop.Set()
 	c.connMutex.Lock()
 	defer c.connMutex.Unlock()
 	var err error
 	if c.conn != nil {
-		c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
+		if graceful {
+			c.conn.WriteControl(websocket.CloseMessage, []byte{}, time.Now().Add(5*time.Second))
+		}
 		err = c.conn.Close()
 	}
 	c.wg.Wait()
@@ -683,7 +704,7 @@ func (c *Client) Reconnect() {
 	}
 
 	go func() {
-		if err := c.disconnect(); err != nil {
+		if err := c.disconnect(c.options.LivenessTimeout <= 0); err != nil {
 			c.setLastError(err)
 			c.onWarning(fmt.Sprintf("error disconnecting: %v", err))
 		}
@@ -709,7 +730,7 @@ func (c *Client) Reconnect() {
 
 		for {
 			// Keep trying until connected, but only until Close() is called.
-			err := c.connectBeforeWorkers(closeCtx, func() {
+			err := c.reconnectAttempt(closeCtx, func() {
 				// A worker can immediately acquire the next reconnect once
 				// isStart is set. This owner's defer must not clear its flag.
 				ownsReconnect = false
@@ -730,6 +751,15 @@ func (c *Client) Reconnect() {
 			}
 		}
 	}()
+}
+
+func (c *Client) reconnectAttempt(ctx context.Context, beforeWorkers func()) error {
+	if c.options.ReconnectTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.options.ReconnectTimeout)
+		defer cancel()
+	}
+	return c.connectBeforeWorkers(ctx, beforeWorkers)
 }
 
 // Ship queues a message for delivery, waiting up to timeout (0 = until there is
@@ -765,15 +795,41 @@ func (c *Client) GetUnsent() ([]*protocol.DataMessage, error) {
 	return messages, nil
 }
 
-func (c *Client) listener() {
+func (c *Client) listener(pongs chan string) {
 	defer c.log("listener exited")
 
 	c.isStart.Wait()
 
+	conn := c.conn
+	timeout := c.options.LivenessTimeout
+	if timeout <= 0 {
+		timeout = 24 * time.Hour
+	} else {
+		refresh := func() error { return conn.SetReadDeadline(time.Now().Add(timeout)) }
+		// A busy receiver may stop reading, and therefore answering pings,
+		// while its independent keepalive still shows the connection is live.
+		conn.SetPingHandler(func(data string) error {
+			if err := refresh(); err != nil {
+				return err
+			}
+			// Keep reading if the peer's TCP window prevents writing the
+			// pong. Retain only the most recent pending reply.
+			select {
+			case <-pongs:
+			default:
+			}
+			pongs <- data // This reader is the sole producer.
+			return nil
+		})
+		conn.SetPongHandler(func(string) error { return refresh() })
+	}
 	for !c.isStop.IsSet() {
 		msg := protocol.ControlMessage{}
-		c.conn.SetReadDeadline(time.Now().Add(24 * time.Hour))
-		if err := c.conn.ReadJSON(&msg); err != nil {
+		conn.SetReadDeadline(time.Now().Add(timeout))
+		if err := conn.ReadJSON(&msg); err != nil {
+			if c.isStop.IsSet() {
+				return
+			}
 			c.onWarning(err.Error())
 			c.setLastError(err)
 			c.Reconnect()
@@ -824,6 +880,11 @@ func (c *Client) sender() {
 		c.log(fmt.Sprintf("re-transmitting %d previously unacked messages", len(um)))
 	}
 
+	if c.options.LivenessTimeout > 0 {
+		if remaining := time.Until(c.backoffUntil); remaining > 0 && c.isStop.WaitFor(remaining) {
+			return
+		}
+	}
 	for !c.isStop.IsSet() {
 		for {
 			backoffSec := atomic.SwapUint64(&c.backoffTime, 0)
@@ -872,7 +933,7 @@ func (c *Client) sender() {
 			}
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(30 * time.Minute))
+		c.conn.SetWriteDeadline(time.Now().Add(establishedWriteTimeout))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
@@ -885,6 +946,12 @@ func (c *Client) sender() {
 // Reconnect preserves the proxy's throttle interval, while Close must be able
 // to interrupt it even when disconnect is already waiting on the sender.
 func (c *Client) waitBackoff(d time.Duration) bool {
+	if c.options.LivenessTimeout > 0 {
+		// Allow a dead connection to be replaced immediately, but keep the
+		// server's throttle in effect for the sender on the new connection.
+		c.backoffUntil = time.Now().Add(d)
+		return c.isStop.WaitFor(d)
+	}
 	var closing <-chan struct{}
 	if c.closeCtx != nil {
 		closing = c.closeCtx.Done()
@@ -899,17 +966,34 @@ func (c *Client) waitBackoff(d time.Duration) bool {
 	}
 }
 
-func (c *Client) keepAliveSender() {
+func (c *Client) keepAliveSender(listenerDone <-chan struct{}, pongs <-chan string) {
 	defer c.log("keepalive exited")
 
 	c.isStart.Wait()
 
+	interval := 30 * time.Second
+	if timeout := c.options.LivenessTimeout; timeout > 0 {
+		interval = min(interval, max(timeout/3, time.Millisecond))
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
-		if c.isStop.WaitFor(30 * time.Second) {
+		opcode := websocket.PingMessage
+		var payload []byte
+		select {
+		case <-listenerDone:
+			return
+		case <-ticker.C:
+		case pong := <-pongs:
+			opcode, payload = websocket.PongMessage, []byte(pong)
+		}
+		if c.isStop.IsSet() {
 			return
 		}
-
-		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(30*time.Minute)); err != nil {
+		// A short socket-write deadline poisons Gorilla's writer if the
+		// peer is temporarily backpressured. Use the data-write budget
+		// here too. Closing the socket ends either write on reconnect.
+		if err := c.conn.WriteControl(opcode, payload, time.Now().Add(establishedWriteTimeout)); err != nil {
 			c.onWarning(fmt.Sprintf("keepalive failed, reconnecting: %v", err))
 			c.setLastError(err)
 			c.Reconnect()
