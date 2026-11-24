@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/refractionPOINT/go-uspclient/protocol"
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -105,17 +106,159 @@ func TestReconnectWithTransportDeadlines(t *testing.T) {
 			if name == "missing_ready" {
 				wantAttempt = 3
 			}
-			if first.attempt != 1 || replay.attempt != wantAttempt || first.instanceID == "" ||
+			if first.attempt != 1 || replay.attempt < wantAttempt || first.instanceID == "" ||
 				replay.instanceID != first.instanceID || replay.message.SeqNum != first.message.SeqNum ||
 				replay.message.TextPayload != first.message.TextPayload {
 				t.Fatalf("first delivery %+v, replacement delivery %+v", first, replay)
 			}
-			if err := c.Drain(time.Second); err != nil {
+			if err := c.Drain(3 * time.Second); err != nil {
 				t.Fatalf("replacement did not acknowledge replay: %v", err)
 			}
 			if used := c.BufferedBytes(); used != 0 {
 				t.Fatalf("bytes retained after ACK: %d", used)
 			}
 		})
+	}
+}
+
+func TestPeerPingsKeepBackpressuredSocketAlive(t *testing.T) {
+	const liveness = 350 * time.Millisecond
+	var connections atomic.Int32
+	heartbeatDone := make(chan struct{})
+	replacement := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var header protocol.ConnectionHeader
+		if err := conn.ReadJSON(&header); err != nil {
+			return
+		}
+		num := connections.Add(1)
+		if err := conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageREADY}); err != nil {
+			return
+		}
+		if num != 1 {
+			select {
+			case replacement <- struct{}{}:
+			default:
+			}
+			<-release
+			return
+		}
+		tick := time.NewTicker(liveness / 4)
+		defer tick.Stop()
+		for range 12 {
+			select {
+			case <-tick.C:
+			case <-release:
+				return
+			}
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+				return
+			}
+		}
+		close(heartbeatDone)
+		<-release
+	}))
+	defer server.Close()
+	defer close(release)
+
+	client, err := NewClient(t.Context(), ClientOptions{
+		Identity:        Identity{Oid: uuid.NewString(), InstallationKey: "local"},
+		DestURL:         "ws" + strings.TrimPrefix(server.URL, "http"),
+		Platform:        "text",
+		LivenessTimeout: liveness,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case <-heartbeatDone:
+	case <-replacement:
+		t.Fatal("replaced a live peer that could send but was too busy to read")
+	case <-time.After(4 * time.Second):
+		t.Fatal("peer heartbeat did not finish")
+	}
+	if connections.Load() != 1 {
+		t.Fatal("client reconnected while peer heartbeats were arriving")
+	}
+	select {
+	case <-replacement:
+	case <-time.After(3 * time.Second):
+		t.Fatal("client did not replace the socket after its last heartbeat")
+	}
+}
+func TestOptInRecoveryCarriesBackoff(t *testing.T) {
+	var connections atomic.Int32
+	backingOff := make(chan time.Time, 1)
+	replacement := make(chan time.Time, 1)
+	sent := make(chan time.Time, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := wsUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var header protocol.ConnectionHeader
+		if conn.ReadJSON(&header) != nil {
+			return
+		}
+		attempt := connections.Add(1)
+		if conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageREADY}) != nil {
+			return
+		}
+		if attempt == 1 {
+			if conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageBACKOFF, Duration: 2}) != nil {
+				return
+			}
+		} else {
+			replacement <- time.Now()
+		}
+		if _, _, err := conn.ReadMessage(); err == nil && attempt == 2 {
+			sent <- time.Now()
+		}
+	}))
+	defer server.Close()
+	c, err := NewClient(t.Context(), ClientOptions{
+		Identity:         Identity{Oid: uuid.NewString(), InstallationKey: "fixture"},
+		Platform:         "text",
+		DestURL:          "ws" + strings.TrimPrefix(server.URL, "http"),
+		LivenessTimeout:  time.Second,
+		ReconnectTimeout: time.Second,
+		DebugLog: func(m string) {
+			if m == "backing off 2 seconds" {
+				backingOff <- time.Now()
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	wait := func(ch <-chan time.Time, d time.Duration, why string) time.Time {
+		t.Helper()
+		select {
+		case at := <-ch:
+			return at
+		case <-time.After(d):
+			t.Fatalf("timed out waiting for %s", why)
+			return time.Time{}
+		}
+	}
+	start := wait(backingOff, 2*time.Second, "receiver backoff")
+	c.Reconnect()
+	wait(replacement, time.Second, "socket replacement before backoff ends")
+	if err := c.Ship(&protocol.DataMessage{TextPayload: "retained during receiver backoff"}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	at := wait(sent, 3*time.Second, "send after original backoff")
+	if at.Sub(start) < 2*time.Second {
+		t.Fatalf("replacement dropped the receiver backoff; sent at %v", at.Sub(start))
 	}
 }

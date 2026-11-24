@@ -108,10 +108,12 @@ type ClientOptions struct {
 	GenURL  func() string `json:"-" yaml:"-" msgpack:"-"`
 
 	// LivenessTimeout bounds how long an established connection can go
-	// without a WebSocket pong. Zero preserves the default keepalive behavior.
+	// without a message, ping or pong from the peer. Zero uses the default
+	// keepalive behavior.
 	LivenessTimeout time.Duration `json:"liveness_timeout,omitempty" yaml:"liveness_timeout,omitempty" msgpack:"liveness_timeout,omitempty"`
-	// ReconnectTimeout bounds each reconnect attempt through the USP READY
-	// response. Zero preserves the default per-phase timeouts.
+	// ReconnectTimeout bounds network setup on each reconnect attempt through
+	// the USP READY response. Zero uses the default per-phase timeouts.
+	// The context passed to NewClient controls initial connection setup.
 	ReconnectTimeout time.Duration `json:"reconnect_timeout,omitempty" yaml:"reconnect_timeout,omitempty" msgpack:"reconnect_timeout,omitempty"`
 
 	// Simple flag to operate the client as a sink for testing.
@@ -790,22 +792,27 @@ func (c *Client) listener() {
 
 	c.isStart.Wait()
 
+	conn := c.conn
 	timeout := c.options.LivenessTimeout
-	if timeout > 0 {
-		conn := c.conn
-		conn.SetReadDeadline(time.Now().Add(timeout))
-		// Gorilla calls this on the reader goroutine. Keep all changes to
-		// its read deadline there, including when pongs arrive during ReadJSON.
-		conn.SetPongHandler(func(string) error {
-			return conn.SetReadDeadline(time.Now().Add(timeout))
+	if timeout <= 0 {
+		timeout = 24 * time.Hour
+	} else {
+		refresh := func() error { return conn.SetReadDeadline(time.Now().Add(timeout)) }
+		pingHandler := conn.PingHandler()
+		// A busy receiver may stop reading, and therefore answering pings,
+		// while its independent keepalive still shows the connection is live.
+		conn.SetPingHandler(func(data string) error {
+			if err := refresh(); err != nil {
+				return err
+			}
+			return pingHandler(data)
 		})
+		conn.SetPongHandler(func(string) error { return refresh() })
 	}
 	for !c.isStop.IsSet() {
 		msg := protocol.ControlMessage{}
-		if timeout <= 0 {
-			c.conn.SetReadDeadline(time.Now().Add(24 * time.Hour))
-		}
-		if err := c.conn.ReadJSON(&msg); err != nil {
+		conn.SetReadDeadline(time.Now().Add(timeout))
+		if err := conn.ReadJSON(&msg); err != nil {
 			if c.isStop.IsSet() {
 				return
 			}
@@ -859,9 +866,7 @@ func (c *Client) sender() {
 		c.log(fmt.Sprintf("re-transmitting %d previously unacked messages", len(um)))
 	}
 
-	writeTimeout := 30 * time.Minute
 	if c.options.LivenessTimeout > 0 {
-		writeTimeout = c.options.LivenessTimeout
 		if remaining := time.Until(c.backoffUntil); remaining > 0 && c.isStop.WaitFor(remaining) {
 			return
 		}
@@ -914,7 +919,7 @@ func (c *Client) sender() {
 			}
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		c.conn.SetWriteDeadline(time.Now().Add(30 * time.Minute))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
@@ -954,8 +959,8 @@ func (c *Client) keepAliveSender() {
 
 	interval, writeTimeout := 30*time.Second, 30*time.Minute
 	if timeout := c.options.LivenessTimeout; timeout > 0 {
-		interval = max(timeout/3, time.Nanosecond)
-		writeTimeout = timeout
+		interval = min(interval, max(timeout/3, time.Millisecond))
+		writeTimeout = interval
 	}
 	for {
 		if c.isStop.WaitFor(interval) {
@@ -963,6 +968,12 @@ func (c *Client) keepAliveSender() {
 		}
 
 		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeTimeout)); err != nil {
+			var netErr net.Error
+			if c.options.LivenessTimeout > 0 && errors.As(err, &netErr) && netErr.Timeout() {
+				// A data write can hold Gorilla's writer while the peer is
+				// backpressured. Incoming traffic remains the liveness signal.
+				continue
+			}
 			c.onWarning(fmt.Sprintf("keepalive failed, reconnecting: %v", err))
 			c.setLastError(err)
 			c.Reconnect()
