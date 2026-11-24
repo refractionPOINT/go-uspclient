@@ -1,6 +1,7 @@
 package uspclient
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -122,8 +123,9 @@ func TestReconnectWithTransportDeadlines(t *testing.T) {
 }
 
 func TestPeerPingsKeepBackpressuredSocketAlive(t *testing.T) {
-	const liveness = 350 * time.Millisecond
+	const liveness = 850 * time.Millisecond
 	var connections atomic.Int32
+	startPressure := make(chan struct{})
 	heartbeatDone := make(chan struct{})
 	replacement := make(chan struct{}, 1)
 	release := make(chan struct{})
@@ -138,6 +140,11 @@ func TestPeerPingsKeepBackpressuredSocketAlive(t *testing.T) {
 			return
 		}
 		num := connections.Add(1)
+		if num == 1 {
+			if err := conn.UnderlyingConn().(*net.TCPConn).SetReadBuffer(4 << 10); err != nil {
+				return
+			}
+		}
 		if err := conn.WriteJSON(protocol.ControlMessage{Verb: protocol.ControlMessageREADY}); err != nil {
 			return
 		}
@@ -146,12 +153,20 @@ func TestPeerPingsKeepBackpressuredSocketAlive(t *testing.T) {
 			case replacement <- struct{}{}:
 			default:
 			}
-			<-release
+			for {
+				if _, _, err := conn.ReadMessage(); err != nil {
+					return
+				}
+			}
+		}
+		select {
+		case <-startPressure:
+		case <-release:
 			return
 		}
-		tick := time.NewTicker(liveness / 4)
+		tick := time.NewTicker(75 * time.Millisecond)
 		defer tick.Stop()
-		for range 12 {
+		for range 28 {
 			select {
 			case <-tick.C:
 			case <-release:
@@ -177,11 +192,23 @@ func TestPeerPingsKeepBackpressuredSocketAlive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
+	client.connMutex.Lock()
+	tcp := client.conn.UnderlyingConn().(*net.TCPConn)
+	client.connMutex.Unlock()
+	if err := tcp.SetWriteBuffer(4 << 10); err != nil {
+		t.Fatal(err)
+	}
+	// The peer never reads this body. Fill the TCP window so responding
+	// to its pings can block on either the socket or the WebSocket writer.
+	if err := client.Ship(&protocol.DataMessage{BinaryPayload: strings.Repeat("x", 8<<20)}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	close(startPressure)
 	select {
 	case <-heartbeatDone:
 	case <-replacement:
 		t.Fatal("replaced a live peer that could send but was too busy to read")
-	case <-time.After(4 * time.Second):
+	case <-time.After(6 * time.Second):
 		t.Fatal("peer heartbeat did not finish")
 	}
 	if connections.Load() != 1 {
@@ -253,7 +280,7 @@ func TestOptInRecoveryCarriesBackoff(t *testing.T) {
 	}
 	start := wait(backingOff, 2*time.Second, "receiver backoff")
 	c.Reconnect()
-	wait(replacement, time.Second, "socket replacement before backoff ends")
+	wait(replacement, time.Until(start.Add(2*time.Second)), "socket replacement before backoff ends")
 	if err := c.Ship(&protocol.DataMessage{TextPayload: "retained during receiver backoff"}, time.Second); err != nil {
 		t.Fatal(err)
 	}

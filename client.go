@@ -68,6 +68,8 @@ type Client struct {
 // goroutine from an earlier test is still winding down.
 var reconnectRetryDelay atomic.Int64
 
+const establishedWriteTimeout = 30 * time.Minute
+
 func init() { reconnectRetryDelay.Store(int64(5 * time.Second)) }
 
 var errClientClosing = errors.New("client is closing")
@@ -642,10 +644,16 @@ func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func())
 		c.log("usp-client connected")
 	}()
 	c.conn = conn
+	listenerDone := make(chan struct{})
+	var pongs chan string
+	if c.options.LivenessTimeout > 0 {
+		pongs = make(chan string, 1)
+	}
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		c.listener()
+		defer close(listenerDone)
+		c.listener(pongs)
 	}()
 	c.wg.Add(1)
 	go func() {
@@ -655,7 +663,7 @@ func (c *Client) connectBeforeWorkers(ctx context.Context, beforeWorkers func())
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		c.keepAliveSender()
+		c.keepAliveSender(listenerDone, pongs)
 	}()
 	return nil
 }
@@ -787,7 +795,7 @@ func (c *Client) GetUnsent() ([]*protocol.DataMessage, error) {
 	return messages, nil
 }
 
-func (c *Client) listener() {
+func (c *Client) listener(pongs chan string) {
 	defer c.log("listener exited")
 
 	c.isStart.Wait()
@@ -798,14 +806,20 @@ func (c *Client) listener() {
 		timeout = 24 * time.Hour
 	} else {
 		refresh := func() error { return conn.SetReadDeadline(time.Now().Add(timeout)) }
-		pingHandler := conn.PingHandler()
 		// A busy receiver may stop reading, and therefore answering pings,
 		// while its independent keepalive still shows the connection is live.
 		conn.SetPingHandler(func(data string) error {
 			if err := refresh(); err != nil {
 				return err
 			}
-			return pingHandler(data)
+			// Keep reading if the peer's TCP window prevents writing the
+			// pong. Retain only the most recent pending reply.
+			select {
+			case <-pongs:
+			default:
+			}
+			pongs <- data // This reader is the sole producer.
+			return nil
 		})
 		conn.SetPongHandler(func(string) error { return refresh() })
 	}
@@ -919,7 +933,7 @@ func (c *Client) sender() {
 			}
 		}
 
-		c.conn.SetWriteDeadline(time.Now().Add(30 * time.Minute))
+		c.conn.SetWriteDeadline(time.Now().Add(establishedWriteTimeout))
 		if err := c.conn.WriteMessage(websocket.BinaryMessage, b.Bytes()); err != nil {
 			c.onWarning(fmt.Sprintf("timeout sending data, reconnecting: %v", err))
 			c.setLastError(err)
@@ -952,28 +966,34 @@ func (c *Client) waitBackoff(d time.Duration) bool {
 	}
 }
 
-func (c *Client) keepAliveSender() {
+func (c *Client) keepAliveSender(listenerDone <-chan struct{}, pongs <-chan string) {
 	defer c.log("keepalive exited")
 
 	c.isStart.Wait()
 
-	interval, writeTimeout := 30*time.Second, 30*time.Minute
+	interval := 30 * time.Second
 	if timeout := c.options.LivenessTimeout; timeout > 0 {
 		interval = min(interval, max(timeout/3, time.Millisecond))
-		writeTimeout = interval
 	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
-		if c.isStop.WaitFor(interval) {
+		opcode := websocket.PingMessage
+		var payload []byte
+		select {
+		case <-listenerDone:
+			return
+		case <-ticker.C:
+		case pong := <-pongs:
+			opcode, payload = websocket.PongMessage, []byte(pong)
+		}
+		if c.isStop.IsSet() {
 			return
 		}
-
-		if err := c.conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(writeTimeout)); err != nil {
-			var netErr net.Error
-			if c.options.LivenessTimeout > 0 && errors.As(err, &netErr) && netErr.Timeout() {
-				// A data write can hold Gorilla's writer while the peer is
-				// backpressured. Incoming traffic remains the liveness signal.
-				continue
-			}
+		// A short socket-write deadline poisons Gorilla's writer if the
+		// peer is temporarily backpressured. Use the data-write budget
+		// here too. Closing the socket ends either write on reconnect.
+		if err := c.conn.WriteControl(opcode, payload, time.Now().Add(establishedWriteTimeout)); err != nil {
 			c.onWarning(fmt.Sprintf("keepalive failed, reconnecting: %v", err))
 			c.setLastError(err)
 			c.Reconnect()
